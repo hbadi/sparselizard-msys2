@@ -52,6 +52,7 @@ depends=("${MINGW_PACKAGE_PREFIX}-cc-libs"
          "${MINGW_PACKAGE_PREFIX}-hwloc"
          "${MINGW_PACKAGE_PREFIX}-metis"
          "${MINGW_PACKAGE_PREFIX}-mumps"
+         $([[ ${CARCH} == aarch64 ]] || echo "${MINGW_PACKAGE_PREFIX}-scalapack")
          $([[ ${CARCH} == aarch64 ]] || echo "${MINGW_PACKAGE_PREFIX}-parmetis")
          "${MINGW_PACKAGE_PREFIX}-omp"
          "${MINGW_PACKAGE_PREFIX}-openblas")
@@ -153,8 +154,12 @@ _petsc() {
   case $1 in
     ?m?)
       opts+=" --with-mpi=1 --with-mpi-compilers=0 --with-pthread=0 --with-openmp=0 --with-metis=1 --with-parmetis=1"
-      opts+=" $(_mumps_opts $1)"
-      pc+=" parmetis msmpi mumps-$1"
+      # PETSc refuses MUMPS without ScaLAPACK on the MPI side, and says so:
+      #   Package mumps requested but dependency scalapack not requested.
+      # It is packaged, and like the MPI variants themselves it exists only
+      # where MPI does.
+      opts+=" $(_mumps_opts $1) --with-scalapack=1 --with-scalapack-lib=-lscalapack"
+      pc+=" parmetis msmpi scalapack mumps-$1"
       libs+=" -lmsmpi"
       # pc_libs is not augmented because MPI is provided by the PkgConfig
       desc="MPI parallel"
