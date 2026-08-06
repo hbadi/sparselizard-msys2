@@ -91,7 +91,13 @@ build() {
       -S "${srcdir}/${_realname}" \
       -B "build-${MSYSTEM}"
 
-  "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}"
+  # makepkg sets MAKEFLAGS from makepkg.conf, which on the CI runners means
+  # -j5 on four cores. Ninja does not read MAKEFLAGS, and left alone would pick
+  # its own default of cores plus two. Pass the number on so that the recipe
+  # honours what the packager asked for rather than deciding for itself.
+  local _jobs
+  _jobs=$(printf '%s' "${MAKEFLAGS}" | sed -nE 's/.*-j[[:space:]]*([0-9]+).*/\1/p')
+  "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}" ${_jobs:+-j "${_jobs}"}
 }
 
 package() {
