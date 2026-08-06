@@ -282,9 +282,17 @@ rien ne bloque. Mais le blocage reste entier en `dto`, qui est la variante reten
 
 ---
 
-## 6. Argumentaire pour l'issue amont
+## 6. L'issue amont — ouverte
 
-À porter chez `msys2/MINGW-packages`, une fois le §5 tranché :
+**[msys2/MINGW-packages#30888][issue]** — *[petsc] Enable the MUMPS interface in the existing build
+flavors*. Ouverte le 2026-08-07, une fois le §5 tranché. Aucune issue équivalente n'existait ; la
+plus proche, #6480, demandait l'empaquetage de MUMPS lui-même et est close depuis 2020.
+
+Le dépôt n'a pas de gabarit couvrant ce cas — `bug_report`, `environment_request`,
+`package_request`, `update_request` — et pas de `config.yml`, donc l'issue libre est autorisée.
+Convention de titre relevée sur les issues existantes : `[paquet] description`.
+
+L'argumentaire, tel que porté :
 
 - **Le changement est minuscule** : une fonction produisant trois drapeaux, appelée dans les trois
   branches d'un `case` existant, plus deux dépendances. Rien n'est retiré ni modifié pour les
@@ -295,7 +303,7 @@ rien ne bloque. Mais le blocage reste entier en `dto`, qui est la variante reten
   upstream pose `--with-metis=1 --with-parmetis=1` sur la **seule** branche MPI du `case`. Le
   paquet porte donc déjà l'asymétrie, en sens inverse.
 - **Preuve à l'appui** : construit sur les quatre environnements, et une application réelle résout
-  effectivement à travers MUMPS sur les deux chaînes gcc.
+  effectivement à travers MUMPS sur **les quatre**, en `dso` (§5).
 
 **Réserves honnêtes à porter :**
 
@@ -308,6 +316,27 @@ rien ne bloque. Mais le blocage reste entier en `dto`, qui est la variante reten
   paquet que beaucoup prennent pour les seuls solveurs itératifs. C'est la première objection
   attendue ; l'alternative est un paquet séparé, que nous avons déjà, mais un second build à douze
   variantes à maintenir paraît pire qu'un drapeau.
+
+**Trois inexactitudes corrigées à la relecture, avant publication** — elles auraient toutes été
+relevées :
+
+- `dso` et `dto` étaient donnés avec la **même** chaîne `PETSC_HAVE_PACKAGES`. Faux : `dso` n'a pas
+  `openmp`, `dto` l'a **deux fois**. Les trois variantes sont maintenant listées séparément.
+- Le « 3 s » des chaînes gcc traînait encore dans la partie sur le blocage. Remplacé par les 142 à
+  191 ms réels (§5).
+- « Pas de mainteneur actif » remplacé par le fait vérifiable : le PKGBUILD porte une ligne
+  `# Contributor` et aucune `# Maintainer`.
+
+**Écarté sciemment de l'issue** : proposer `--with-metis=1` sur les branches `?s?` et `?t?`. Cela
+n'activerait qu'une chose dans tout PETSc — l'enregistrement de `MATORDERINGMETISND`, seul garde de
+`PETSC_HAVE_METIS` dans l'arbre — et n'a d'intérêt que par le chemin `canuseordering`, ouvert quand
+`size == 1`, où `-pc_factor_mat_ordering_type metisnd` fait passer `ICNTL(7)` de 7 à 1. Réel mais
+facultatif, et surtout cela **modifierait** la configuration de variantes existantes, ce qui ruine
+l'argument « rien n'est modifié pour les variantes actuelles ». À reprendre après, s'il y a lieu.
+Scotch, lui, n'a rien de séquentiel côté PETSc : `PETSC_HAVE_PTSCOTCH` ne garde que des
+partitionneurs parallèles, et c'est PT-Scotch, paquet distinct de celui que MUMPS lie.
+
+[issue]: https://github.com/msys2/MINGW-packages/issues/30888
 
 ---
 
