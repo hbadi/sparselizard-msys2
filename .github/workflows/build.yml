@@ -1,0 +1,70 @@
+name: build
+
+# The point of this workflow is to exercise the four MSYS2 environments the
+# package claims, without installing any of them locally. It mirrors what
+# msys2/MINGW-packages runs on a pull request, so what is green here has a fair
+# chance of being green there.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.msystem }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Every environment is reported, rather than stopping at the first
+      # failure: knowing that three of four are fine is the useful outcome.
+      fail-fast: false
+      matrix:
+        include:
+          - { msystem: MINGW64,    prefix: mingw64,    runner: windows-2022 }
+          - { msystem: UCRT64,     prefix: ucrt64,     runner: windows-2022 }
+          - { msystem: CLANG64,    prefix: clang64,    runner: windows-2022 }
+          - { msystem: CLANGARM64, prefix: clangarm64, runner: windows-11-arm }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            base-devel
+            git
+          # pacboy resolves the environment prefix, so one line covers the four.
+          pacboy: >-
+            cc:p
+            cmake:p
+            ninja:p
+            pkgconf:p
+            petsc:p
+            slepc:p
+            openblas:p
+
+      - name: Build the package
+        shell: msys2 {0}
+        env:
+          MINGW_ARCH: ${{ matrix.prefix }}
+        run: |
+          cd mingw-w64-sparselizard
+          makepkg-mingw --syncdeps --cleanbuild --force --noconfirm
+
+      - name: Install it and check what landed
+        shell: msys2 {0}
+        run: |
+          cd mingw-w64-sparselizard
+          pacman -U --noconfirm --needed *.pkg.tar.zst
+          echo "--- files ---"
+          pacman -Ql ${MINGW_PACKAGE_PREFIX}-sparselizard | head -20
+          echo "--- the CMake package has to be usable, that is the point ---"
+          test -f "${MINGW_PREFIX}/lib/cmake/sparselizard/sparselizardConfig.cmake"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.msystem }}
+          path: mingw-w64-sparselizard/*.pkg.tar.zst
+          if-no-files-found: ignore

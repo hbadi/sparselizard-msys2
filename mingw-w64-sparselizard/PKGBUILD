@@ -1,0 +1,72 @@
+# Maintainer: hbadi <badi.hamid@gmail.com>
+
+_realname=sparselizard
+pkgbase=mingw-w64-${_realname}
+pkgname="${MINGW_PACKAGE_PREFIX}-${_realname}"
+pkgver=2022.05
+pkgrel=1
+pkgdesc="General purpose finite element library for multiphysics simulation (mingw-w64)"
+arch=('any')
+# Not mingw32: petsc and slepc are not built for it either, so the dependencies
+# do not exist there.
+mingw_arch=('mingw64' 'ucrt64' 'clang64' 'clangarm64')
+url='http://www.sparselizard.org'
+license=('spdx:GPL-2.0-or-later')
+depends=("${MINGW_PACKAGE_PREFIX}-cc-libs"
+         "${MINGW_PACKAGE_PREFIX}-openblas"
+         "${MINGW_PACKAGE_PREFIX}-petsc"
+         "${MINGW_PACKAGE_PREFIX}-slepc")
+makedepends=("${MINGW_PACKAGE_PREFIX}-cc"
+             "${MINGW_PACKAGE_PREFIX}-cmake"
+             "${MINGW_PACKAGE_PREFIX}-ninja"
+             "${MINGW_PACKAGE_PREFIX}-pkgconf"
+             'git')
+
+# Sourced from a branch rather than a release tarball while the CMake packaging
+# support is still under review upstream. Submitting this recipe means either
+# waiting for that to land, or carrying the difference as patch files here, which
+# is the usual practice. See the README.
+_fork='https://github.com/hbadi/sparselizard.git'
+_branch='hbadi/msys2-mingw'
+source=("${_realname}::git+${_fork}#branch=${_branch}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${_realname}"
+  # The version the library reports at run time, then the distance from it, so
+  # that successive snapshots order correctly for pacman.
+  printf "2022.05.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  # PETSc ships one library per scalar type and parallel model. dto is real
+  # double with PETSc's own MPI stub and OpenMP; it is the only real double
+  # variant present on every environment, the MPI ones being absent on aarch64.
+  #
+  # OpenMP is off for sparselizard itself: it does not need it. Its dependencies
+  # are where the parallelism lives, and petsc-dto is already built with it.
+  MSYS2_ARG_CONV_EXCL=-DCMAKE_INSTALL_PREFIX= \
+    "${MINGW_PREFIX}/bin/cmake.exe" \
+      -GNinja \
+      -DCMAKE_INSTALL_PREFIX="${MINGW_PREFIX}" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DPETSC_VARIANT=dto \
+      -DSPARSELIZARD_ENABLE_OPENMP=OFF \
+      -DSPARSELIZARD_ENABLE_MPI=OFF \
+      -DSPARSELIZARD_ENABLE_GMSH=OFF \
+      -DSPARSELIZARD_BUILD_SIMULATIONS=OFF \
+      -DSPARSELIZARD_BUILD_EXAMPLES=OFF \
+      -S "${srcdir}/${_realname}" \
+      -B "build-${MSYSTEM}"
+
+  "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}"
+}
+
+package() {
+  DESTDIR="${pkgdir}" "${MINGW_PREFIX}/bin/cmake.exe" --install "build-${MSYSTEM}"
+
+  install -Dm644 "${srcdir}/${_realname}/LICENSE" \
+    "${pkgdir}${MINGW_PREFIX}/share/licenses/${_realname}/LICENSE"
+  install -Dm644 "${srcdir}/${_realname}/COPYRIGHT" \
+    "${pkgdir}${MINGW_PREFIX}/share/licenses/${_realname}/COPYRIGHT"
+}
