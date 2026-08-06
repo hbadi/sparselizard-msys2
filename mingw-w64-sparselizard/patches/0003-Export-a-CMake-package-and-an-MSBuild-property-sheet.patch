@@ -1,0 +1,409 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Thu, 6 Aug 2026 01:09:53 +0200
+Subject: [PATCH 3/6] Export a CMake package and an MSBuild property sheet
+
+An application consuming sparselizard had to restate by hand what the build
+already knows: three include directories, the compiler settings PETSc needs,
+the link line, and the directories the loader has to search. Nothing published
+that, so every consumer rediscovered it, and getting one item wrong fails in
+ways that do not name the cause.
+
+install(TARGETS) carried no EXPORT, so find_package(sparselizard) could not
+work at all. Export the target and ship a config file, so an application writes
+
+    find_package(sparselizard REQUIRED)
+    target_link_libraries(app PRIVATE sparselizard::sparselizard)
+
+The include directories are wrapped in BUILD_INTERFACE/INSTALL_INTERFACE, as
+an export refuses build-tree paths. PETSc, SLEPc and BLAS are PUBLIC link
+dependencies and are found again by the config file, seeded with the locations
+used at build time; each seed is a plain cache entry, so -DPETSC_DIR=... still
+wins. The BLAS is recorded rather than searched for again, since locating
+oneMKL normally requires its setvars script to have been sourced first, which
+an application building against an already-built sparselizard has no reason to
+have done. FindCBLAS now honours a caller-provided BLAS_LIBRARIES for that.
+
+A .vcxproj cannot read a CMake package, so the same information is emitted a
+second time as an MSBuild property sheet, generated from the same variables as
+sparselizard-env.cmd so the three cannot drift. Adding it through the Property
+Manager is the whole of the setup. Beyond the settings it also checks the two
+requirements that cannot be relaxed, because both fail silently otherwise:
+
+- The application must use the release C runtime, including in Debug builds.
+  sparselizard exchanges std::string and std::vector with it, and the debug CRT
+  lays them out differently. Nothing fails at build or link time; objects
+  simply arrive corrupted, a mesh name reaching the library empty.
+- x64 only. A Win32 build gets unresolved externals that read as a missing
+  library.
+
+sparselizard-env.cmd listed the dependency directories but not the one holding
+sparselizard's own shared library. The examples get away without it because
+they are built into that same directory and the loader searches the one holding
+the executable image; a binary built anywhere else does not, and fails with
+0xC0000135 naming no module. Add it, for the helper and the property sheet
+alike.
+
+project() gains the version the library reports at runtime, 2022.5.11, so the
+installed package can be version-checked.
+
+Verified with cl.exe on Windows: a .vcxproj whose only sparselizard setting is
+the imported sheet, and a CMakeLists using find_package in a shell where no
+Intel environment script was sourced, both build, link and run
+examples/capacitance-computing to its expected value. Both checks fire with
+their message when deliberately violated.
+
+(cherry picked from commit 357919d3dc41320cbc3379812e6e2142bec0c288)
+---
+ CMakeLists.txt                    |   6 +-
+ cMake/FindCBLAS.cmake             |  11 ++-
+ cMake/sparselizardConfig.cmake.in |  57 +++++++++++++++
+ cMake/writepropertysheet.cmake    | 112 ++++++++++++++++++++++++++++++
+ src/CMakeLists.txt                |  87 +++++++++++++++++++++--
+ 5 files changed, 267 insertions(+), 6 deletions(-)
+ create mode 100644 cMake/sparselizardConfig.cmake.in
+ create mode 100644 cMake/writepropertysheet.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8c804018..adacd431 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2,7 +2,11 @@
+ 
+ cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+ 
+-project(Sparselizard LANGUAGES CXX)
++# 2022.5.11 is what the library reports at runtime: sl::getversion() returns
++# 202205 and sl::getsubversion() returns 11, the "friendly fox" release. The
++# version is needed here so that the installed package can be version-checked by
++# find_package(sparselizard 2022.5).
++project(Sparselizard VERSION 2022.5.11 LANGUAGES CXX)
+ 
+ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cMake")
+ include(GNUInstallDirs)
+diff --git a/cMake/FindCBLAS.cmake b/cMake/FindCBLAS.cmake
+index 67b37f4f..9ee7d3b6 100644
+--- a/cMake/FindCBLAS.cmake
++++ b/cMake/FindCBLAS.cmake
+@@ -18,7 +18,16 @@
+ 
+ include(FindPackageHandleStandardArgs)
+ 
+-find_package(BLAS QUIET)
++# A caller that already knows which BLAS to use says so by setting BLAS_LIBRARIES,
++# and the stock module is skipped. This is what sparselizardConfig.cmake does: the
++# BLAS was resolved once when the library was built, and re-running the search in
++# the application's environment would otherwise need the vendor's own environment
++# script to have been sourced first.
++if(BLAS_LIBRARIES)
++    set(BLAS_FOUND TRUE)
++else()
++    find_package(BLAS QUIET)
++endif()
+ 
+ set(CBLAS_HEADER_HINTS "")
+ if(DEFINED ENV{MKLROOT})
+diff --git a/cMake/sparselizardConfig.cmake.in b/cMake/sparselizardConfig.cmake.in
+new file mode 100644
+index 00000000..2ac6b1a5
+--- /dev/null
++++ b/cMake/sparselizardConfig.cmake.in
+@@ -0,0 +1,57 @@
++@PACKAGE_INIT@
++
++# PETSc, SLEPc and BLAS are PUBLIC link dependencies of sparselizard: an
++# application that links sparselizard links them too, so they have to be found
++# again here. The Find modules are installed next to this file.
++list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
++
++include(CMakeFindDependencyMacro)
++
++# Seed the search with the locations that were used to build this sparselizard.
++# Each is a plain cache entry, so passing -DPETSC_DIR=... on the command line
++# still wins: the values below are a default, not a lock.
++if(NOT PETSC_DIR AND NOT DEFINED ENV{PETSC_DIR})
++    set(PETSC_DIR "@PETSC_DIR@" CACHE PATH "Root of an existing PETSc installation")
++endif()
++if(NOT PETSC_ARCH AND NOT DEFINED ENV{PETSC_ARCH})
++    set(PETSC_ARCH "@PETSC_ARCH@" CACHE STRING "PETSc architecture (empty for a prefix install)")
++endif()
++if(NOT SLEPC_DIR AND NOT DEFINED ENV{SLEPC_DIR})
++    set(SLEPC_DIR "@SLEPC_DIR@" CACHE PATH "Root of an existing SLEPc installation")
++endif()
++if(NOT BLA_VENDOR)
++    set(BLA_VENDOR "@BLA_VENDOR@" CACHE STRING "BLAS implementation to look for")
++endif()
++# The BLAS is recorded rather than searched for again: locating oneMKL normally
++# requires its setvars script to have been sourced, which an application building
++# against an already-built sparselizard has no reason to have done.
++if(NOT BLAS_LIBRARIES)
++    set(BLAS_LIBRARIES "@BLAS_LIBRARIES@" CACHE FILEPATH "BLAS libraries to link")
++endif()
++if(NOT CBLAS_INCLUDE_DIR)
++    set(CBLAS_INCLUDE_DIR "@CBLAS_INCLUDE_DIR@" CACHE PATH "Directory holding the BLAS C interface header")
++endif()
++
++find_dependency(PETSc)
++find_dependency(SLEPc)
++find_dependency(CBLAS)
++
++if(@SPARSELIZARD_ENABLE_MPI@)
++    find_dependency(MPI COMPONENTS CXX)
++endif()
++if(@SPARSELIZARD_ENABLE_GMSH@)
++    find_dependency(GMSH)
++endif()
++if(@SPARSELIZARD_ENABLE_OPENMP@)
++    find_dependency(OpenMP COMPONENTS CXX)
++endif()
++
++include("${CMAKE_CURRENT_LIST_DIR}/sparselizardTargets.cmake")
++
++# The directories the loader has to search to start a linked binary. Neither
++# CMake nor the linker can express this on Windows, where there is no RPATH, so
++# it is handed to the application as a variable and also written to the helper
++# script and the property sheet installed beside this file.
++set(sparselizard_RUNTIME_DIRS "@SPARSELIZARD_RUNTIME_PATHS@")
++
++check_required_components(sparselizard)
+diff --git a/cMake/writepropertysheet.cmake b/cMake/writepropertysheet.cmake
+new file mode 100644
+index 00000000..834dee32
+--- /dev/null
++++ b/cMake/writepropertysheet.cmake
+@@ -0,0 +1,112 @@
++# sparselizard_write_property_sheet
++# ---------------------------------
++# Write an MSBuild property sheet carrying everything a Visual Studio C++
++# project needs to consume sparselizard. A .vcxproj cannot read a CMake package,
++# so this is the equivalent artefact for that half of the world, generated from
++# the same variables as sparselizardConfig.cmake and sparselizard-env.cmd.
++#
++#   sparselizard_write_property_sheet(<out-file>
++#       INCLUDE_DIRS <dirs>    prepended to AdditionalIncludeDirectories
++#       LIBRARY_DIRS <dirs>    prepended to AdditionalLibraryDirectories
++#       LIBRARIES    <libs>    prepended to AdditionalDependencies
++#       RUNTIME_DIRS <dirs>    prepended to PATH for the debugger
++#       [RELATIVE_TO_SHEET]    emit the paths relative to the sheet itself,
++#                              for a relocatable package rather than a build tree
++#   )
++
++function(sparselizard_write_property_sheet _out)
++    cmake_parse_arguments(SP "RELATIVE_TO_SHEET" ""
++        "INCLUDE_DIRS;LIBRARY_DIRS;LIBRARIES;RUNTIME_DIRS" ${ARGN})
++
++    # $(MSBuildThisFileDirectory) always ends in a backslash, so a relative path
++    # is appended to it directly.
++    if(SP_RELATIVE_TO_SHEET)
++        set(_root "$(MSBuildThisFileDirectory)")
++    else()
++        set(_root "")
++    endif()
++
++    # MSBuild separates list items with ';' and native paths use '\'.
++    function(_sp_pathlist _var _dirs)
++        set(_acc "")
++        foreach(_d IN LISTS _dirs)
++            if(_d STREQUAL "")
++                continue()
++            endif()
++            file(TO_NATIVE_PATH "${_d}" _nd)
++            string(REPLACE "&" "&amp;" _nd "${_nd}")
++            string(REPLACE "<" "&lt;" _nd "${_nd}")
++            string(REPLACE ">" "&gt;" _nd "${_nd}")
++            if(_acc STREQUAL "")
++                set(_acc "${_root}${_nd}")
++            else()
++                set(_acc "${_acc};${_root}${_nd}")
++            endif()
++        endforeach()
++        set(${_var} "${_acc}" PARENT_SCOPE)
++    endfunction()
++
++    _sp_pathlist(_inc "${SP_INCLUDE_DIRS}")
++    _sp_pathlist(_lib "${SP_LIBRARY_DIRS}")
++    _sp_pathlist(_run "${SP_RUNTIME_DIRS}")
++    string(REPLACE ";" ";" _deps "${SP_LIBRARIES}")
++
++    set(_c "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
++    string(APPEND _c "<!--\n")
++    # An XML comment cannot contain a double hyphen, so none of the text below may.
++    string(APPEND _c "  sparselizard ${PROJECT_VERSION}. Generated by CMake, do not edit.\n")
++    string(APPEND _c "\n")
++    string(APPEND _c "  Add this sheet through View > Property Manager and the project is done:\n")
++    string(APPEND _c "  include directories, compiler requirements, link line and the loader\n")
++    string(APPEND _c "  search path for the debugger all come from here.\n")
++    string(APPEND _c "-->\n")
++    string(APPEND _c "<Project ToolsVersion=\"4.0\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n")
++    string(APPEND _c "  <PropertyGroup Label=\"UserMacros\">\n")
++    string(APPEND _c "    <SparselizardVersion>${PROJECT_VERSION}</SparselizardVersion>\n")
++    string(APPEND _c "    <SparselizardRuntimeDirs>${_run}</SparselizardRuntimeDirs>\n")
++    string(APPEND _c "  </PropertyGroup>\n")
++    string(APPEND _c "\n")
++    string(APPEND _c "  <ItemDefinitionGroup>\n")
++    string(APPEND _c "    <ClCompile>\n")
++    string(APPEND _c "      <AdditionalIncludeDirectories>${_inc};%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\n")
++    string(APPEND _c "      <!-- petscstring.h calls strncpy/strncat, which /sdl promotes from C4996 to an error. -->\n")
++    string(APPEND _c "      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>\n")
++    string(APPEND _c "      <!-- The PetscDefined() macros need a conforming preprocessor; the\n")
++    string(APPEND _c "           traditional MSVC one mis-expands them into about 120 errors. -->\n")
++    string(APPEND _c "      <UseStandardPreprocessor>true</UseStandardPreprocessor>\n")
++    string(APPEND _c "      <!-- sparselizard passes std::string and std::vector across the DLL\n")
++    string(APPEND _c "           boundary, so the application must use the same C runtime as the\n")
++    string(APPEND _c "           library. See the check below for what happens otherwise. -->\n")
++    string(APPEND _c "      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>\n")
++    string(APPEND _c "      <BasicRuntimeChecks>Default</BasicRuntimeChecks>\n")
++    string(APPEND _c "    </ClCompile>\n")
++    string(APPEND _c "    <Link>\n")
++    string(APPEND _c "      <AdditionalLibraryDirectories>${_lib};%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>\n")
++    string(APPEND _c "      <AdditionalDependencies>${_deps};%(AdditionalDependencies)</AdditionalDependencies>\n")
++    string(APPEND _c "    </Link>\n")
++    string(APPEND _c "  </ItemDefinitionGroup>\n")
++    string(APPEND _c "\n")
++    string(APPEND _c "  <!-- Neither sparselizard.dll nor its dependencies sit in a directory the\n")
++    string(APPEND _c "       loader searches by default. Without this, F5 fails at the first call\n")
++    string(APPEND _c "       into MKL with 0xC06D007E and names no module. -->\n")
++    string(APPEND _c "  <PropertyGroup>\n")
++    string(APPEND _c "    <LocalDebuggerEnvironment>PATH=$(SparselizardRuntimeDirs);%PATH%\n")
++    string(APPEND _c "$(LocalDebuggerEnvironment)</LocalDebuggerEnvironment>\n")
++    string(APPEND _c "    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>\n")
++    string(APPEND _c "  </PropertyGroup>\n")
++    string(APPEND _c "\n")
++    string(APPEND _c "  <!-- A project setting overrides an imported sheet, so the two requirements\n")
++    string(APPEND _c "       that cannot be relaxed are checked rather than merely set. Both failures\n")
++    string(APPEND _c "       are silent at build and link time: the debug CRT mismatch shows up as a\n")
++    string(APPEND _c "       std::string arriving empty inside the library, and a Win32 build gets\n")
++    string(APPEND _c "       unresolved externals that read as a missing library. -->\n")
++    string(APPEND _c "  <Target Name=\"SparselizardCheckAbi\" BeforeTargets=\"ClCompile\">\n")
++    string(APPEND _c "    <Error Condition=\"'$(Platform)' != 'x64'\"\n")
++    string(APPEND _c "           Text=\"sparselizard ${PROJECT_VERSION} is x64 only; this project targets $(Platform).\" />\n")
++    string(APPEND _c "    <Error Condition=\"'%(ClCompile.RuntimeLibrary)' == 'MultiThreadedDebugDLL' or '%(ClCompile.RuntimeLibrary)' == 'MultiThreadedDebug'\"\n")
++    string(APPEND _c "           Text=\"sparselizard requires the release C runtime (/MD), including in Debug builds: it exchanges std::string and std::vector with the application, and the debug CRT lays them out differently (_ITERATOR_DEBUG_LEVEL 2 against 0). Nothing fails at build or link time -- the objects simply arrive corrupted. Set C/C++ > Code Generation > Runtime Library to 'Multi-threaded DLL (/MD)' and remove _DEBUG from the preprocessor definitions; /Od and /Zi are unaffected, the build stays debuggable.\" />\n")
++    string(APPEND _c "  </Target>\n")
++    string(APPEND _c "</Project>\n")
++
++    file(WRITE "${_out}" "${_c}")
++endfunction()
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index bc6680b9..0cd9f7b5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -21,9 +21,27 @@ set(SRC_DIR_LIST
+ custom_add_library_from_dir(sparselizard "${SRC_DIR_LIST}")
+ custom_copy_file(sparselizard "${SRC_DIR_LIST}" "${SPARSELIZARD_INCLUDE_STAGE_DIR}" "*.h")
+ 
+-target_include_directories(sparselizard PUBLIC ${SRC_DIR_LIST})
++foreach(_d IN LISTS SRC_DIR_LIST)
++    target_include_directories(sparselizard PUBLIC $<BUILD_INTERFACE:${_d}>)
++endforeach()
++target_include_directories(sparselizard PUBLIC
++    $<BUILD_INTERFACE:${SPARSELIZARD_INCLUDE_STAGE_DIR}>
++    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/sparselizard>)
+ target_compile_features(sparselizard PUBLIC cxx_std_11)
+ 
++# What an application inherits merely by including sparselizard.h. Stated on the
++# target so that a CMake consumer, the generated property sheet and the NuGet
++# package all take it from one place instead of restating it three times.
++#
++# /Zc:preprocessor  the PetscDefined() macros need a conforming preprocessor;
++#                   MSVC's traditional one mis-expands them, ~120 errors.
++# _CRT_SECURE_NO_WARNINGS  petscstring.h calls strncpy/strncat, which /sdl
++#                   promotes from warning C4996 to an error.
++target_compile_options(sparselizard INTERFACE
++    $<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
++target_compile_definitions(sparselizard INTERFACE
++    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
++
+ # --- Required dependencies ---------------------------------------------------
+ find_package(PETSc REQUIRED)
+ find_package(SLEPc REQUIRED)
+@@ -67,14 +85,18 @@ if(SPARSELIZARD_ENABLE_OPENMP)
+     target_link_libraries(sparselizard PUBLIC OpenMP::OpenMP_CXX)
+ endif()
+ 
+-target_include_directories(sparselizard PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
++target_include_directories(sparselizard PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
+ 
+ # --- Runtime search path ------------------------------------------------------
+ # Third-party shared libraries stay where they were installed; only their
+ # directories are recorded, so nothing has to be copied or kept in sync. The
+ # list feeds the CTest environment and the generated helper script below, and is
+ # a cache variable so that an extra directory can be appended by hand.
+-set(_rt_dirs ${SLEPc_RUNTIME_DIRS})
++# sparselizard's own shared library first. The examples get away without it
++# because they are built into the same directory and the loader searches the one
++# holding the executable, but a binary built anywhere else does not.
++set(_rt_dirs "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}" "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
++list(APPEND _rt_dirs ${SLEPc_RUNTIME_DIRS})
+ get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+ if(IS_DIRECTORY "${_cxx_bin}")
+     list(APPEND _rt_dirs "${_cxx_bin}")   # libmmd, svml_dispmd, libifcoremd
+@@ -126,10 +148,67 @@ endif()
+ file(WRITE "${_env_script}" "${_body}")
+ message(STATUS "Runtime helper .... ${_env_script}")
+ 
+-install(TARGETS sparselizard)
++# A Visual Studio project cannot consume a CMake package, so the same
++# information is emitted a second time as an MSBuild property sheet. Adding it
++# through the Property Manager is the whole setup: it carries the include
++# directories, the compiler requirements, the link line and the loader search
++# path. Generated from the variables just computed, so it cannot drift from the
++# CMake target. This is also the file the NuGet package ships as
++# build/native/sparselizard.props.
++if(WIN32)
++    include("${CMAKE_SOURCE_DIR}/cMake/writepropertysheet.cmake")
++    sparselizard_write_property_sheet(
++        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sparselizard.props"
++        INCLUDE_DIRS "${SPARSELIZARD_INCLUDE_STAGE_DIR};${PETSc_INCLUDE_DIR};${PETSc_CONF_INCLUDE_DIR}"
++        LIBRARY_DIRS "${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}"
++        LIBRARIES    "sparselizard.lib"
++        RUNTIME_DIRS "${SPARSELIZARD_RUNTIME_PATHS}")
++    message(STATUS "MSBuild sheet ..... ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sparselizard.props")
++endif()
++
++# --- Installation and CMake package -------------------------------------------
++# Exporting the target is what lets an application write
++#
++#     find_package(sparselizard REQUIRED)
++#     target_link_libraries(app PRIVATE sparselizard::sparselizard)
++#
++# and inherit the include directories, the PUBLIC dependencies and the compiler
++# requirements above, instead of restating them by hand.
++set(SPARSELIZARD_CMAKE_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/sparselizard")
++
++install(TARGETS sparselizard EXPORT sparselizardTargets
++        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
++        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
++        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
++        INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/sparselizard")
+ install(DIRECTORY "${SPARSELIZARD_INCLUDE_STAGE_DIR}/"
+         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/sparselizard"
+         FILES_MATCHING PATTERN "*.h")
++install(EXPORT sparselizardTargets
++        NAMESPACE sparselizard::
++        DESTINATION "${SPARSELIZARD_CMAKE_DIR}")
++
++include(CMakePackageConfigHelpers)
++configure_package_config_file(
++    "${CMAKE_SOURCE_DIR}/cMake/sparselizardConfig.cmake.in"
++    "${CMAKE_CURRENT_BINARY_DIR}/sparselizardConfig.cmake"
++    INSTALL_DESTINATION "${SPARSELIZARD_CMAKE_DIR}")
++write_basic_package_version_file(
++    "${CMAKE_CURRENT_BINARY_DIR}/sparselizardConfigVersion.cmake"
++    VERSION "${PROJECT_VERSION}"
++    COMPATIBILITY SameMinorVersion)
++install(FILES
++        "${CMAKE_CURRENT_BINARY_DIR}/sparselizardConfig.cmake"
++        "${CMAKE_CURRENT_BINARY_DIR}/sparselizardConfigVersion.cmake"
++        DESTINATION "${SPARSELIZARD_CMAKE_DIR}")
++# find_dependency(PETSc) in the config file resolves through these.
++install(FILES
++        "${CMAKE_SOURCE_DIR}/cMake/FindPETSc.cmake"
++        "${CMAKE_SOURCE_DIR}/cMake/FindSLEPc.cmake"
++        "${CMAKE_SOURCE_DIR}/cMake/FindCBLAS.cmake"
++        "${CMAKE_SOURCE_DIR}/cMake/FindGMSH.cmake"
++        "${CMAKE_SOURCE_DIR}/cMake/functions.cmake"
++        DESTINATION "${SPARSELIZARD_CMAKE_DIR}/modules")
+ 
+ # --- Configuration summary ---------------------------------------------------
+ # Emitted here rather than at the top level: the find_package results live in

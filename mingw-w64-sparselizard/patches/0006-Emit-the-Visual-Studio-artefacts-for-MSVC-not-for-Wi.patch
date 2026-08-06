@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Thu, 6 Aug 2026 15:50:59 +0200
+Subject: [PATCH 6/6] Emit the Visual Studio artefacts for MSVC, not for
+ Windows
+
+The property sheet and the NuGet package were guarded on WIN32. MinGW is
+Windows too, so a MinGW build produced a Visual Studio property sheet naming
+.dll.a import libraries and its own header layout, which no Visual Studio
+project can use. Guard on MSVC, which is what both artefacts are for.
+
+(cherry picked from commit 841c0067b0b2ee03b789f61330998b307f37fde0)
+---
+ src/CMakeLists.txt | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 3e43fa8c..ffb4bca6 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -168,7 +168,12 @@ message(STATUS "Runtime helper .... ${_env_script}")
+ # path. Generated from the variables just computed, so it cannot drift from the
+ # CMake target. This is also the file the NuGet package ships as
+ # build/native/sparselizard.props.
+-if(WIN32)
++#
++# MSVC and not WIN32: MinGW is Windows too, and would otherwise be handed a
++# property sheet naming .dll.a import libraries and its own header paths, which
++# no Visual Studio project can use. Same for the NuGet package below, whose
++# whole content is MSVC specific.
++if(MSVC)
+     include("${CMAKE_SOURCE_DIR}/cMake/writepropertysheet.cmake")
+     sparselizard_write_property_sheet(
+         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sparselizard.props"

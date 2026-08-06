@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Thu, 6 Aug 2026 00:52:46 +0200
+Subject: [PATCH 2/6] Drop the global using namespace std from a public header
+
+hierarchicalformfunctioncontainer.h opened the std namespace at global
+scope. The header is pulled in by rawfield.h, so every translation unit
+that includes sparselizard.h inherited it.
+
+Under -std=c++20 that makes sl::integral ambiguous with the std::integral
+concept, and any example using integral() stops compiling:
+
+  error C2872: 'integral': ambiguous symbol
+  error C3245: 'std::integral': use of a variable template requires a
+               template argument list
+
+The directive was vestigial: the header already qualified std::string and
+std::vector everywhere except the two members below. Qualify those and
+remove it.
+
+(cherry picked from commit 1b6281813c1cc7b96e71eb33beccca87a0fb0ef3)
+---
+ .../hierarchical/hierarchicalformfunctioncontainer.h      | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/src/shapefunction/hierarchical/hierarchicalformfunctioncontainer.h b/src/shapefunction/hierarchical/hierarchicalformfunctioncontainer.h
+index 812983cd..199a3f5e 100755
+--- a/src/shapefunction/hierarchical/hierarchicalformfunctioncontainer.h
++++ b/src/shapefunction/hierarchical/hierarchicalformfunctioncontainer.h
+@@ -14,8 +14,6 @@
+ #include "polynomial.h"
+ #include "orientation.h"
+ 
+-using namespace std;
+-
+ class hierarchicalformfunctioncontainer
+ {
+ 
+@@ -39,10 +37,10 @@ class hierarchicalformfunctioncontainer
+         // - for derivative ki if m is 1, eta 2, phi 3, none 0
+         // - at component n (0 for x, 1 for y and 2 for z)
+         // - evaluation point o
+-        vector<vector<vector<vector<vector<vector<vector<vector<double>>>>>>>> val = {};
+-        
++        std::vector<std::vector<std::vector<std::vector<std::vector<std::vector<std::vector<std::vector<double>>>>>>>> val = {};
++
+         // The form function polynomials are stored in the same format but without [m] and [o]:
+-        vector<vector<vector<vector<vector<vector<polynomial>>>>>> ffpoly = {};
++        std::vector<std::vector<std::vector<std::vector<std::vector<std::vector<polynomial>>>>>> ffpoly = {};
+ 
+     public:
+ 

@@ -3,7 +3,12 @@
 _realname=sparselizard
 pkgbase=mingw-w64-${_realname}
 pkgname="${MINGW_PACKAGE_PREFIX}-${_realname}"
-pkgver=2022.05
+# The last tag, v.2022.05, is 65 commits behind master and predates the CMake
+# build entirely: it still carries the old cMake/Setup*.cmake scheme, and none
+# of the patches below applies to it. Pin the commit instead, and order the
+# version so that pacman sees successive snapshots correctly.
+_commit='0b826d88339f2591864f3254d2025ed49ae39275'
+pkgver=2022.05.r65
 pkgrel=1
 pkgdesc="General purpose finite element library for multiphysics simulation (mingw-w64)"
 arch=('any')
@@ -22,20 +27,47 @@ makedepends=("${MINGW_PACKAGE_PREFIX}-cc"
              "${MINGW_PACKAGE_PREFIX}-pkgconf"
              'git')
 
-# Sourced from a branch rather than a release tarball while the CMake packaging
-# support is still under review upstream. Submitting this recipe means either
-# waiting for that to land, or carrying the difference as patch files here, which
-# is the usual practice. See the README.
-_fork='https://github.com/hbadi/sparselizard.git'
-_branch='hbadi/msys2-mingw'
-source=("${_realname}::git+${_fork}#branch=${_branch}")
-sha256sums=('SKIP')
+source=("${_realname}::git+https://github.com/halbux/sparselizard.git#commit=${_commit}"
+        '0001-Build-against-existing-PETSc-SLEPc-instead-of-a-fixe.patch'
+        '0002-Drop-the-global-using-namespace-std-from-a-public-he.patch'
+        '0003-Export-a-CMake-package-and-an-MSBuild-property-sheet.patch'
+        '0004-Fall-back-to-PETSc-s-own-LU-when-the-requested-solve.patch'
+        '0005-Find-a-PETSc-that-ships-one-library-per-variant.patch'
+        '0006-Emit-the-Visual-Studio-artefacts-for-MSVC-not-for-Wi.patch')
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP')
 
-pkgver() {
+# What each patch is for, since a reviewer should not have to open them:
+#
+#  0001  replaces the ~/SLlibs layout with discovery of an existing PETSc and
+#        SLEPc, which is what lets the library build against packaged ones at
+#        all. Upstream's own work, carried here while it is under review.
+#  0002  removes a global "using namespace std" from a public header. Without
+#        it sl::integral collides with the std::integral concept, and any
+#        application using integral() fails to compile: gcc 16 defaults to a
+#        standard where that concept exists.
+#  0003  adds install(EXPORT) and the config file, so that the package installs
+#        something a consumer can find_package().
+#  0004  falls back to PETSc's own LU when the requested direct solver is not
+#        registered. sparselizard asks for MUMPS by name and the packaged PETSc
+#        is built without it, which costs nothing at build time and returned nan
+#        at the first solve.
+#  0005  teaches discovery about a PETSc shipping one library per scalar type
+#        and parallel model, which is how it is packaged here.
+#  0006  emits the Visual Studio artefacts for MSVC rather than for Windows at
+#        large, MinGW being Windows too.
+
+prepare() {
   cd "${srcdir}/${_realname}"
-  # The version the library reports at run time, then the distance from it, so
-  # that successive snapshots order correctly for pacman.
-  printf "2022.05.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  for p in "${srcdir}"/????-*.patch; do
+    msg2 "Applying $(basename "${p}")"
+    patch -Np1 -i "${p}"
+  done
 }
 
 build() {

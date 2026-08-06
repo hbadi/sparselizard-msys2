@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Thu, 6 Aug 2026 15:22:58 +0200
+Subject: [PATCH 5/6] Find a PETSc that ships one library per variant
+
+Some distributions build PETSc once per scalar type and parallel model rather
+than once. MSYS2 ships twelve, named <scalar><parallel>o, each with its own
+headers, import library and .pc file:
+
+  /mingw64/include/petsc/dto/     petscconf.h, one per variant
+  /mingw64/include/petsc/         petsc.h, common to all
+  /mingw64/lib/petsc/dto/         libpetsc.dll.a
+  /mingw64/lib/pkgconfig/         petsc-dto.pc
+
+Nothing there answers to the module name PETSc, so discovery stopped at the
+first step and the fallback found no petscconf.h either.
+
+Ask pkg-config for the variant-suffixed name. The .pc files carry everything,
+including the Fortran runtime, which differs between the MSYS2 environments
+since clang64 and clangarm64 use flang rather than gfortran; going through
+pkg-config is what makes one recipe work across all of them. PETSC_VARIANT
+selects explicitly, and an explicit value is taken as given so that a typo
+fails here rather than silently linking a different scalar type. Left empty,
+the real double variants are tried in turn and the choice is reported. SLEPc
+follows whatever PETSc settled on, since one built against another variant
+links but does not work.
+
+The MPIUNI stub moves too. An in-place PETSc puts it under PETSC_DIR; a
+packaged one puts it beside petsc.h, which for a multi-variant install means
+the directory common to the variants rather than the variant's own. Both are
+now offered, the second derived from where petsc.h was found, and the result
+goes first on the include path: an MPI implementation installed alongside owns
+<mpi.h> too, MS-MPI on MSYS2 for one, and picking that up while linking a PETSc
+built with MPIUNI compiles cleanly and then does not work.
+
+Verified on MSYS2/MinGW64 with gcc 16.1 against petsc 3.25.1 and slepc 3.25.0
+from the official packages: configure selects dto on its own, the library
+builds without error, and examples/capacitance-computing returns its expected
+1.30634e-10. No change to a conventional PETSC_DIR installation, which still
+takes the same path as before.
+
+(cherry picked from commit ad2116cc30359ab63c03ebe056b66cabef624d42)
+---
+ cMake/FindPETSc.cmake | 36 +++++++++++++++++++++++++++++++++++-
+ cMake/FindSLEPc.cmake | 17 ++++++++++++++++-
+ src/CMakeLists.txt    | 23 ++++++++++++++++++-----
+ 3 files changed, 69 insertions(+), 7 deletions(-)
+
+diff --git a/cMake/FindPETSc.cmake b/cMake/FindPETSc.cmake
+index 7a524fc1..7c486969 100644
+--- a/cMake/FindPETSc.cmake
++++ b/cMake/FindPETSc.cmake
+@@ -12,6 +12,7 @@
+ #   PETSc_FOUND
+ #   PETSc::PETSc      imported target carrying includes and link interface
+ #   PETSc_VERSION
++#   PETSC_VARIANT     the variant that was selected, empty for a plain install
+ 
+ include(FindPackageHandleStandardArgs)
+ include("${CMAKE_CURRENT_LIST_DIR}/functions.cmake")
+@@ -19,6 +20,17 @@ include("${CMAKE_CURRENT_LIST_DIR}/functions.cmake")
+ set(PETSC_DIR "$ENV{PETSC_DIR}" CACHE PATH "Root of an existing PETSc installation")
+ set(PETSC_ARCH "$ENV{PETSC_ARCH}" CACHE STRING "PETSc architecture (empty for a prefix install)")
+ 
++# Some distributions ship one PETSc per scalar type and parallel model rather
++# than one library, each with its own headers, its own import library and its
++# own .pc. MSYS2 names them <scalar><parallel>o, where the scalar is s, d, c or
++# z for real single, real double, complex single or complex double, and the
++# parallel model is m for MPI, s for sequential and t for OpenMP. sparselizard
++# needs a real double one; among those, only the sequential and OpenMP variants
++# exist on every platform, since the MPI ones are absent on aarch64.
++set(PETSC_VARIANT "$ENV{PETSC_VARIANT}" CACHE STRING
++    "PETSc variant to use when the installation ships several, e.g. dto")
++set(_petsc_preferred_variants dto dso dmo)
++
+ # --- 1. pkg-config -----------------------------------------------------------
+ find_package(PkgConfig QUIET)
+ if(PkgConfig_FOUND)
+@@ -29,7 +41,29 @@ if(PkgConfig_FOUND)
+         endif()
+         set(ENV{PKG_CONFIG_PATH} "${PETSC_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+     endif()
+-    pkg_check_modules(PC_PETSC QUIET PETSc)
++
++    # An explicit variant is taken as given and nothing else is tried, so that a
++    # typo fails here rather than silently linking a different scalar type.
++    if(PETSC_VARIANT)
++        set(_petsc_modules "petsc-${PETSC_VARIANT}")
++    else()
++        set(_petsc_modules PETSc petsc)
++        foreach(_v IN LISTS _petsc_preferred_variants)
++            list(APPEND _petsc_modules "petsc-${_v}")
++        endforeach()
++    endif()
++
++    foreach(_m IN LISTS _petsc_modules)
++        pkg_check_modules(PC_PETSC QUIET "${_m}")
++        if(PC_PETSC_FOUND)
++            if(NOT PETSC_VARIANT AND _m MATCHES "^petsc-(.+)$")
++                set(PETSC_VARIANT "${CMAKE_MATCH_1}" CACHE STRING
++                    "PETSc variant to use when the installation ships several, e.g. dto" FORCE)
++                message(STATUS "PETSc ships several variants, selected '${PETSC_VARIANT}'")
++            endif()
++            break()
++        endif()
++    endforeach()
+ endif()
+ 
+ # --- 2. headers --------------------------------------------------------------
+diff --git a/cMake/FindSLEPc.cmake b/cMake/FindSLEPc.cmake
+index a1d89068..cf2938c0 100644
+--- a/cMake/FindSLEPc.cmake
++++ b/cMake/FindSLEPc.cmake
+@@ -26,7 +26,22 @@ if(PkgConfig_FOUND)
+         endif()
+         set(ENV{PKG_CONFIG_PATH} "${SLEPC_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+     endif()
+-    pkg_check_modules(PC_SLEPC QUIET SLEPc)
++
++    # SLEPc is built against one PETSc, so where PETSc ships several variants
++    # SLEPc ships the matching ones under the same names. FindPETSc has already
++    # run and settled PETSC_VARIANT; follow it rather than choose again, since a
++    # SLEPc from one variant over a PETSc from another links but does not work.
++    set(_slepc_modules SLEPc slepc)
++    if(PETSC_VARIANT)
++        set(_slepc_modules "slepc-${PETSC_VARIANT}")
++    endif()
++
++    foreach(_m IN LISTS _slepc_modules)
++        pkg_check_modules(PC_SLEPC QUIET "${_m}")
++        if(PC_SLEPC_FOUND)
++            break()
++        endif()
++    endforeach()
+ endif()
+ 
+ find_path(SLEPc_INCLUDE_DIR
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0cd9f7b5..3e43fa8c 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -59,18 +59,31 @@ else()
+     # slmpi.cpp includes <mpi.h> unconditionally. A PETSc configured with
+     # --with-mpi=0 ships the MPIUNI stub for exactly this case; without it the
+     # header has to come from somewhere else.
++    #
++    # Where the stub sits depends on the installation. An in-place PETSc puts it
++    # under PETSC_DIR; a packaged one puts it beside petsc.h, which for a
++    # distribution shipping several variants means the directory common to them
++    # rather than the variant's own. Both are offered, the second derived from
++    # where petsc.h was actually found.
++    #
++    # NO_DEFAULT_PATH is what makes this safe. An MPI implementation installed
++    # alongside owns <mpi.h> too, MS-MPI on MSYS2 for one, and picking that up
++    # while linking a PETSc built with MPIUNI compiles cleanly and then does not
++    # work.
+     find_path(MPIUNI_INCLUDE_DIR
+         NAMES mpi.h
+-        HINTS "${PETSC_DIR}/include/petsc/mpiuni"
++        HINTS "${PETSC_DIR}/include/petsc/mpiuni" "${PETSc_INCLUDE_DIR}/petsc/mpiuni"
+         NO_DEFAULT_PATH)
+     if(MPIUNI_INCLUDE_DIR)
+-        target_include_directories(sparselizard PUBLIC ${MPIUNI_INCLUDE_DIR})
++        # Ahead of everything else, for the same reason.
++        target_include_directories(sparselizard BEFORE PUBLIC ${MPIUNI_INCLUDE_DIR})
+         message(STATUS "MPI disabled, using the PETSc MPIUNI stub at ${MPIUNI_INCLUDE_DIR}")
+     else()
+         message(WARNING
+-            "MPI is disabled and no MPIUNI stub was found under PETSC_DIR. "
+-            "src/slmpi.cpp includes <mpi.h> and will not compile. Either enable "
+-            "SPARSELIZARD_ENABLE_MPI or point PETSC_DIR at a PETSc built with --with-mpi=0.")
++            "MPI is disabled and no MPIUNI stub was found next to the PETSc headers "
++            "nor under PETSC_DIR. src/slmpi.cpp includes <mpi.h> and will not "
++            "compile. Either enable SPARSELIZARD_ENABLE_MPI or point PETSC_DIR at a "
++            "PETSc built with --with-mpi=0.")
+     endif()
+ endif()
+ 

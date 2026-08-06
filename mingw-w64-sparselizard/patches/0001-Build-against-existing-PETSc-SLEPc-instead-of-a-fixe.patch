@@ -1,0 +1,1394 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Wed, 5 Aug 2026 17:18:10 +0200
+Subject: [PATCH 1/6] Build against existing PETSc/SLEPc instead of a fixed
+ layout
+
+The cMake/Setup*.cmake modules looked for blas, metis, mumps and slepc
+inside ${PETSC_PATH}/arch-linux-c-opt, the layout produced by
+install_external_libs/install_petsc.sh and its --download-* flags. Anyone
+who installed those libraries from a package manager, or built them
+separately, could not configure the project.
+
+Replace them with Find modules that locate an existing installation:
+pkg-config first, then the conventional PETSC_DIR / PETSC_ARCH /
+SLEPC_DIR variables. Nothing is downloaded or built here.
+
+METIS and MUMPS are no longer required. Neither is included by any source
+file, and the HAVE_METIS / HAVE_MUMPS macros they defined are never
+tested; both reach the binary through PETSc's own link line. Requiring
+them only made configuration fail for no benefit.
+
+Alongside:
+
+- Options for what was hard-coded: BUILD_SHARED_LIBS instead of a forced
+  SHARED, SPARSELIZARD_ENABLE_MPI / _GMSH / _OPENMP, and
+  _BUILD_EXAMPLES / _BUILD_SIMULATIONS.
+- Drop -fPIC -no-pie -O3 and -fopenmp from the compile line; they are
+  GCC spellings that no MSVC-style driver accepts. CMAKE_POSITION_-
+  INDEPENDENT_CODE, the build type and find_package(OpenMP) do the same
+  job portably.
+- target_compile_definitions instead of directory-wide add_definitions.
+- examples/CMakeLists.txt builds every examples/<name>/main.cpp, staging
+  data files per example because their names collide, and registers each
+  as a test with its working directory.
+- densemat.cpp includes "cblas.h", which oneMKL does not ship; FindCBLAS
+  generates a relay header when the vendor header goes by another name.
+- universe.cpp called omp_set_num_threads() unguarded, so an OpenMP-less
+  build failed to link. It is the only OpenMP call in the project.
+- circuit-coupling-rlc-harmonic used std::complex without including
+  <complex>, which only worked where another header pulled it in.
+
+Tested on Windows with Intel oneAPI (icx) against a separately built
+PETSc 3.25 and SLEPc 3.25: 54 example binaries build and 46 of them run
+to completion.
+
+Signed-off-by: hbadi <badi.hamid@gmail.com>
+(cherry picked from commit ea3cc395f96a7da098a02a62b938cf6bcd719d1f)
+---
+ CMakeLists.txt                                |  96 +++++++----
+ cMake/FindCBLAS.cmake                         |  68 ++++++++
+ cMake/FindGMSH.cmake                          |  34 ++++
+ cMake/FindPETSc.cmake                         | 114 +++++++++++++
+ cMake/FindSLEPc.cmake                         |  98 +++++++++++
+ cMake/SetupBLAS.cmake                         |  47 ------
+ cMake/SetupGMSH.cmake                         |  43 -----
+ cMake/SetupMETIS.cmake                        |  47 ------
+ cMake/SetupMPI.cmake                          |  49 ------
+ cMake/SetupMUMPS.cmake                        |  47 ------
+ cMake/SetupPETSC.cmake                        |  60 -------
+ cMake/SetupSLEPC.cmake                        |  47 ------
+ cMake/functions.cmake                         | 136 ++++++++++++++--
+ examples/CMakeLists.txt                       |  90 +++++++++++
+ .../circuit-coupling-rlc-harmonic/main.cpp    |   2 +
+ src/CMakeLists.txt                            | 153 +++++++++++++-----
+ src/universe.cpp                              |   4 +
+ 17 files changed, 715 insertions(+), 420 deletions(-)
+ create mode 100644 cMake/FindCBLAS.cmake
+ create mode 100644 cMake/FindGMSH.cmake
+ create mode 100644 cMake/FindPETSc.cmake
+ create mode 100644 cMake/FindSLEPc.cmake
+ delete mode 100644 cMake/SetupBLAS.cmake
+ delete mode 100644 cMake/SetupGMSH.cmake
+ delete mode 100644 cMake/SetupMETIS.cmake
+ delete mode 100644 cMake/SetupMPI.cmake
+ delete mode 100644 cMake/SetupMUMPS.cmake
+ delete mode 100644 cMake/SetupPETSC.cmake
+ delete mode 100644 cMake/SetupSLEPC.cmake
+ create mode 100644 examples/CMakeLists.txt
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index aeeed1d0..8c804018 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,43 +1,77 @@
+ # Thanks to S. Matsievskiy for bringing cmake to the project.
+ 
+-cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
++cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
+ 
+ project(Sparselizard LANGUAGES CXX)
+ 
+-set(DEFAULT_BUILD_TYPE "Release")
+-set(CMAKE_BUILD_TYPE "${DEFAULT_BUILD_TYPE}" CACHE STRING "Choose the type of build" FORCE)
++list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cMake")
++include(GNUInstallDirs)
++include(cMake/functions.cmake)
+ 
+-set(PETSC_PATH "~/SLlibs/petsc" CACHE STRING "Provide the path to the petsc folder")
+-set(GMSH_PATH "~/SLlibs/gmsh" CACHE STRING "Provide the path to the gmsh folder")
+-set(MPI_PATH "" CACHE STRING "Provide the path to the mpi folder")
++# --- Options -----------------------------------------------------------------
++#
++# Dependencies are never downloaded or built by this project. Install them with
++# a package manager, or build them separately and point the cache variables at
++# the result:
++#
++#   PETSC_DIR / PETSC_ARCH   an existing PETSc  (also read from the environment)
++#   SLEPC_DIR                an existing SLEPc  (idem)
++#   GMSH_ROOT                an existing Gmsh SDK
++#   BLA_VENDOR               picks the BLAS, e.g. Intel10_64lp_seq for oneMKL
++#
++# BUILD_SHARED_LIBS is the stock CMake switch and selects a shared or a static
++# libsparselizard.
+ 
+-# Place library in build folder:
+-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
++option(SPARSELIZARD_ENABLE_MPI "Build with MPI support" OFF)
++option(SPARSELIZARD_ENABLE_GMSH "Build with the Gmsh API" OFF)
++option(SPARSELIZARD_ENABLE_OPENMP "Build with OpenMP" ON)
++option(SPARSELIZARD_BUILD_SIMULATIONS "Build the simulation targets" ON)
++option(SPARSELIZARD_BUILD_EXAMPLES "Build every example under examples/" OFF)
++option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+ 
+-# Default flags:
+-set(BLAS_FOUND NO)
+-set(GMSH_FOUND NO)
+-set(METIS_FOUND NO)
+-set(MPI_FOUND NO)
+-set(MUMPS_FOUND NO)
+-set(PETSC_FOUND NO)
+-set(SLEPC_FOUND NO)
++# Name objects foo.obj rather than foo.cpp.obj. The Ninja and Makefile
++# generators append the source extension by default, which only matters when two
++# sources in one directory share a stem across languages; every source here is
++# .cpp. The Visual Studio generators already replace.
++set(CMAKE_CXX_OUTPUT_EXTENSION_REPLACE 1)
++set(CMAKE_C_OUTPUT_EXTENSION_REPLACE 1)
++
++if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
++    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build" FORCE)
++    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
++        Debug Release RelWithDebInfo MinSizeRel)
++endif()
++
++# C++ sources going into a shared library must be position independent; on
++# Windows, a shared library also needs an export table, and sparselizard carries
++# no __declspec annotations.
++set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
++
++# Every executable, and on Windows the shared library too, lands in a single
++# bin/ directory. This is what keeps one copy of sparselizard.dll for all the
++# example binaries: the Windows loader searches the directory holding the
++# executable image, never the current directory, so an example started from its
++# own data directory still finds the library next to its own .exe.
++#
++# On Unix the shared object is a LIBRARY artefact and goes to lib/; the relative
++# RPATH below plays the same role.
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
++set(SPARSELIZARD_INCLUDE_STAGE_DIR "${CMAKE_BINARY_DIR}/include")
++
++set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
++set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
++
++enable_testing()
+ 
+-# Installation definitions
+-include(GNUInstallDirs)
+-# Aux functions
+-include(cMake/functions.cmake)
+-include(cMake/SetupBLAS.cmake)
+-include(cMake/SetupGMSH.cmake)
+-include(cMake/SetupMETIS.cmake)
+-include(cMake/SetupMPI.cmake)
+-include(cMake/SetupMUMPS.cmake)
+-include(cMake/SetupPETSC.cmake)
+-include(cMake/SetupSLEPC.cmake)
+-
+-# Add libsparselizard target
+ add_subdirectory(src)
+ 
+-# Add simulations targets
+-add_subdirectory(simulations)
++if(SPARSELIZARD_BUILD_SIMULATIONS)
++    add_subdirectory(simulations)
++endif()
+ 
++if(SPARSELIZARD_BUILD_EXAMPLES)
++    add_subdirectory(examples)
++endif()
+diff --git a/cMake/FindCBLAS.cmake b/cMake/FindCBLAS.cmake
+new file mode 100644
+index 00000000..67b37f4f
+--- /dev/null
++++ b/cMake/FindCBLAS.cmake
+@@ -0,0 +1,68 @@
++# FindCBLAS
++# ---------
++# sparselizard needs exactly one BLAS entry point, cblas_dgemm in densemat.cpp,
++# reached through a C interface header.
++#
++# The header name is not portable: the reference implementation and OpenBLAS
++# install cblas.h, oneMKL installs mkl_cblas.h, and some distributions bury it
++# in an openblas/ subdirectory. Rather than patching the source for each vendor,
++# a one-line relay header named cblas.h is generated in the build tree whenever
++# the vendor header goes by another name.
++#
++# The library itself is looked up with the stock FindBLAS module, so the usual
++# BLA_VENDOR switch applies, e.g. -DBLA_VENDOR=Intel10_64lp_seq for oneMKL.
++#
++# Result:
++#   CBLAS_FOUND
++#   CBLAS::CBLAS
++
++include(FindPackageHandleStandardArgs)
++
++find_package(BLAS QUIET)
++
++set(CBLAS_HEADER_HINTS "")
++if(DEFINED ENV{MKLROOT})
++    list(APPEND CBLAS_HEADER_HINTS "$ENV{MKLROOT}/include")
++endif()
++
++find_path(CBLAS_INCLUDE_DIR
++    NAMES cblas.h mkl_cblas.h
++    HINTS ${CBLAS_HEADER_HINTS}
++    PATH_SUFFIXES openblas blis)
++
++if(CBLAS_INCLUDE_DIR)
++    if(EXISTS "${CBLAS_INCLUDE_DIR}/cblas.h")
++        set(CBLAS_HEADER_NAME "cblas.h")
++    else()
++        set(CBLAS_HEADER_NAME "mkl_cblas.h")
++    endif()
++endif()
++
++find_package_handle_standard_args(CBLAS
++    REQUIRED_VARS CBLAS_INCLUDE_DIR BLAS_FOUND)
++
++if(CBLAS_FOUND AND NOT TARGET CBLAS::CBLAS)
++    set(_cblas_incs "${CBLAS_INCLUDE_DIR}")
++
++    if(NOT CBLAS_HEADER_NAME STREQUAL "cblas.h")
++        # densemat.cpp includes "cblas.h" unconditionally; give it one.
++        set(_shim_dir "${CMAKE_BINARY_DIR}/cblas-shim")
++        file(MAKE_DIRECTORY "${_shim_dir}")
++        file(WRITE "${_shim_dir}/cblas.h"
++"/* Generated by cMake/FindCBLAS.cmake -- do not edit.
++   This BLAS installation exposes its C interface as <${CBLAS_HEADER_NAME}>. */
++#pragma once
++#include <${CBLAS_HEADER_NAME}>
++")
++        # After the vendor directory, so a real cblas.h always wins.
++        list(APPEND _cblas_incs "${_shim_dir}")
++        message(STATUS "CBLAS: relay header generated for ${CBLAS_HEADER_NAME}")
++    endif()
++
++    add_library(CBLAS::CBLAS INTERFACE IMPORTED)
++    set_target_properties(CBLAS::CBLAS PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES "${_cblas_incs}"
++        INTERFACE_LINK_LIBRARIES "${BLAS_LIBRARIES}")
++endif()
++
++mark_as_advanced(CBLAS_INCLUDE_DIR)
+diff --git a/cMake/FindGMSH.cmake b/cMake/FindGMSH.cmake
+new file mode 100644
+index 00000000..d3831a9e
+--- /dev/null
++++ b/cMake/FindGMSH.cmake
+@@ -0,0 +1,34 @@
++# FindGMSH
++# --------
++# Locate an existing Gmsh SDK (the C++ API, not the standalone binary).
++# Optional dependency: it only guards the HAVE_GMSH code paths.
++#
++# Set GMSH_ROOT to point at an SDK unpacked by hand.
++#
++# Result:
++#   GMSH_FOUND
++#   GMSH::GMSH
++
++include(FindPackageHandleStandardArgs)
++
++set(GMSH_ROOT "$ENV{GMSH_ROOT}" CACHE PATH "Root of an existing Gmsh SDK")
++
++find_path(GMSH_INCLUDE_DIR
++    NAMES gmsh.h
++    HINTS "${GMSH_ROOT}/include")
++
++find_library(GMSH_LIBRARY
++    NAMES gmsh libgmsh
++    HINTS "${GMSH_ROOT}/lib")
++
++find_package_handle_standard_args(GMSH
++    REQUIRED_VARS GMSH_LIBRARY GMSH_INCLUDE_DIR)
++
++if(GMSH_FOUND AND NOT TARGET GMSH::GMSH)
++    add_library(GMSH::GMSH INTERFACE IMPORTED)
++    set_target_properties(GMSH::GMSH PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES "${GMSH_INCLUDE_DIR}"
++        INTERFACE_LINK_LIBRARIES "${GMSH_LIBRARY}")
++endif()
++
++mark_as_advanced(GMSH_INCLUDE_DIR GMSH_LIBRARY)
+diff --git a/cMake/FindPETSc.cmake b/cMake/FindPETSc.cmake
+new file mode 100644
+index 00000000..7a524fc1
+--- /dev/null
++++ b/cMake/FindPETSc.cmake
+@@ -0,0 +1,114 @@
++# FindPETSc
++# ---------
++# Locate an existing PETSc installation. Nothing is downloaded or built here:
++# either the library comes from a package manager, or it was built beforehand.
++#
++# Discovery order:
++#   1. pkg-config (PETSc ships PETSc.pc, and so do the distribution packages)
++#   2. PETSC_DIR / PETSC_ARCH, the conventional PETSc variables, taken from the
++#      cache or the environment
++#
++# Result:
++#   PETSc_FOUND
++#   PETSc::PETSc      imported target carrying includes and link interface
++#   PETSc_VERSION
++
++include(FindPackageHandleStandardArgs)
++include("${CMAKE_CURRENT_LIST_DIR}/functions.cmake")
++
++set(PETSC_DIR "$ENV{PETSC_DIR}" CACHE PATH "Root of an existing PETSc installation")
++set(PETSC_ARCH "$ENV{PETSC_ARCH}" CACHE STRING "PETSc architecture (empty for a prefix install)")
++
++# --- 1. pkg-config -----------------------------------------------------------
++find_package(PkgConfig QUIET)
++if(PkgConfig_FOUND)
++    if(PETSC_DIR)
++        if(PETSC_ARCH)
++            list(APPEND CMAKE_PREFIX_PATH "${PETSC_DIR}/${PETSC_ARCH}")
++            set(ENV{PKG_CONFIG_PATH} "${PETSC_DIR}/${PETSC_ARCH}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
++        endif()
++        set(ENV{PKG_CONFIG_PATH} "${PETSC_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
++    endif()
++    pkg_check_modules(PC_PETSC QUIET PETSc)
++endif()
++
++# --- 2. headers --------------------------------------------------------------
++find_path(PETSc_INCLUDE_DIR
++    NAMES petsc.h
++    HINTS ${PC_PETSC_INCLUDE_DIRS} "${PETSC_DIR}/include")
++
++# petscconf.h lives in the arch tree for an in-place build, next to petsc.h for
++# a prefix install.
++find_path(PETSc_CONF_INCLUDE_DIR
++    NAMES petscconf.h
++    HINTS ${PC_PETSC_INCLUDE_DIRS} "${PETSC_DIR}/${PETSC_ARCH}/include" "${PETSC_DIR}/include")
++
++# --- 3. library --------------------------------------------------------------
++find_library(PETSc_LIBRARY
++    NAMES petsc libpetsc
++    HINTS ${PC_PETSC_LIBRARY_DIRS} "${PETSC_DIR}/${PETSC_ARCH}/lib" "${PETSC_DIR}/lib")
++
++# --- 4. version --------------------------------------------------------------
++if(PC_PETSC_VERSION)
++    set(PETSc_VERSION "${PC_PETSC_VERSION}")
++elseif(PETSc_INCLUDE_DIR AND EXISTS "${PETSc_INCLUDE_DIR}/petscversion.h")
++    file(STRINGS "${PETSc_INCLUDE_DIR}/petscversion.h" _v REGEX "#define PETSC_VERSION_(MAJOR|MINOR|SUBMINOR) ")
++    string(REGEX REPLACE ".*MAJOR[ \t]+([0-9]+).*" "\\1" _major "${_v}")
++    string(REGEX REPLACE ".*MINOR[ \t]+([0-9]+).*" "\\1" _minor "${_v}")
++    string(REGEX REPLACE ".*SUBMINOR[ \t]+([0-9]+).*" "\\1" _patch "${_v}")
++    set(PETSc_VERSION "${_major}.${_minor}.${_patch}")
++endif()
++
++find_package_handle_standard_args(PETSc
++    REQUIRED_VARS PETSc_LIBRARY PETSc_INCLUDE_DIR PETSc_CONF_INCLUDE_DIR
++    VERSION_VAR PETSc_VERSION)
++
++if(PETSc_FOUND AND NOT TARGET PETSc::PETSc)
++    # Prefer the whole pkg-config link interface when we have one: it already
++    # carries whatever PETSc was configured against. The directories found by
++    # find_library are appended as hints, since the ones coming from the .pc file
++    # may be unusable (see _sl_existing_dirs).
++    get_filename_component(_petsc_libdir "${PETSc_LIBRARY}" DIRECTORY)
++    _sl_existing_dirs(_petsc_libdirs "${PC_PETSC_LIBRARY_DIRS};${_petsc_libdir}")
++    if(PC_PETSC_LIBRARIES)
++        _sl_resolve_libs(_petsc_libs "${PC_PETSC_LIBRARIES}" "${_petsc_libdirs}")
++    else()
++        set(_petsc_libs "${PETSc_LIBRARY}")
++    endif()
++
++    _sl_existing_dirs(_petsc_incs
++        "${PETSc_INCLUDE_DIR};${PETSc_CONF_INCLUDE_DIR};${PC_PETSC_INCLUDE_DIRS}")
++
++    # A PETSc configured with --with-cxx=0 never probed a C++ compiler, so the
++    # C++ half of its petscconf.h is missing. petscmacros.h still refers to it
++    # from every C++ translation unit, and the compiler stops on undeclared
++    # identifiers. Exactly two macros are concerned in the PETSc headers, so
++    # supply the values configure would have written rather than requiring a
++    # rebuild. Each is filled in only when genuinely absent, so a PETSc built
++    # with C++ support keeps its own.
++    set(_petsc_defs)
++    if(EXISTS "${PETSc_CONF_INCLUDE_DIR}/petscconf.h")
++        set(_petsc_cxx_fallbacks
++            "PETSC_FUNCTION_NAME_CXX=__func__"    # standard since C++11
++            "PETSC_CXX_RESTRICT=__restrict")      # accepted by gcc, clang and msvc
++        foreach(_def IN LISTS _petsc_cxx_fallbacks)
++            string(REGEX REPLACE "=.*$" "" _name "${_def}")
++            file(STRINGS "${PETSc_CONF_INCLUDE_DIR}/petscconf.h" _hit
++                 REGEX "^#define[ \t]+${_name}[ \t]")
++            if(NOT _hit)
++                list(APPEND _petsc_defs "${_def}")
++            endif()
++        endforeach()
++        if(_petsc_defs)
++            message(STATUS "PETSc was built without C++ support, supplying: ${_petsc_defs}")
++        endif()
++    endif()
++
++    add_library(PETSc::PETSc INTERFACE IMPORTED)
++    set_target_properties(PETSc::PETSc PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES "${_petsc_incs}"
++        INTERFACE_LINK_LIBRARIES "${_petsc_libs}"
++        INTERFACE_COMPILE_DEFINITIONS "${_petsc_defs}")
++endif()
++
++mark_as_advanced(PETSc_INCLUDE_DIR PETSc_CONF_INCLUDE_DIR PETSc_LIBRARY)
+diff --git a/cMake/FindSLEPc.cmake b/cMake/FindSLEPc.cmake
+new file mode 100644
+index 00000000..a1d89068
+--- /dev/null
++++ b/cMake/FindSLEPc.cmake
+@@ -0,0 +1,98 @@
++# FindSLEPc
++# ---------
++# Locate an existing SLEPc installation. Same contract as FindPETSc: nothing is
++# downloaded, discovery goes through pkg-config first, then SLEPC_DIR.
++#
++# SLEPc always sits on top of PETSc, so PETSc::PETSc is pulled in as a
++# dependency of the imported target.
++#
++# Result:
++#   SLEPc_FOUND
++#   SLEPc::SLEPc
++#   SLEPc_VERSION
++
++include(FindPackageHandleStandardArgs)
++include("${CMAKE_CURRENT_LIST_DIR}/functions.cmake")
++
++set(SLEPC_DIR "$ENV{SLEPC_DIR}" CACHE PATH "Root of an existing SLEPc installation")
++
++find_package(PETSc QUIET)
++
++find_package(PkgConfig QUIET)
++if(PkgConfig_FOUND)
++    if(SLEPC_DIR)
++        if(PETSC_ARCH)
++            set(ENV{PKG_CONFIG_PATH} "${SLEPC_DIR}/${PETSC_ARCH}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
++        endif()
++        set(ENV{PKG_CONFIG_PATH} "${SLEPC_DIR}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
++    endif()
++    pkg_check_modules(PC_SLEPC QUIET SLEPc)
++endif()
++
++find_path(SLEPc_INCLUDE_DIR
++    NAMES slepc.h
++    HINTS ${PC_SLEPC_INCLUDE_DIRS} "${SLEPC_DIR}/include")
++
++find_path(SLEPc_CONF_INCLUDE_DIR
++    NAMES slepcconf.h
++    HINTS ${PC_SLEPC_INCLUDE_DIRS} "${SLEPC_DIR}/${PETSC_ARCH}/include" "${SLEPC_DIR}/include")
++
++find_library(SLEPc_LIBRARY
++    NAMES slepc libslepc
++    HINTS ${PC_SLEPC_LIBRARY_DIRS} "${SLEPC_DIR}/${PETSC_ARCH}/lib" "${SLEPC_DIR}/lib")
++
++if(PC_SLEPC_VERSION)
++    set(SLEPc_VERSION "${PC_SLEPC_VERSION}")
++elseif(SLEPc_INCLUDE_DIR AND EXISTS "${SLEPc_INCLUDE_DIR}/slepcversion.h")
++    file(STRINGS "${SLEPc_INCLUDE_DIR}/slepcversion.h" _v REGEX "#define SLEPC_VERSION_(MAJOR|MINOR|SUBMINOR) ")
++    string(REGEX REPLACE ".*MAJOR[ \t]+([0-9]+).*" "\\1" _major "${_v}")
++    string(REGEX REPLACE ".*MINOR[ \t]+([0-9]+).*" "\\1" _minor "${_v}")
++    string(REGEX REPLACE ".*SUBMINOR[ \t]+([0-9]+).*" "\\1" _patch "${_v}")
++    set(SLEPc_VERSION "${_major}.${_minor}.${_patch}")
++endif()
++
++find_package_handle_standard_args(SLEPc
++    REQUIRED_VARS SLEPc_LIBRARY SLEPc_INCLUDE_DIR SLEPc_CONF_INCLUDE_DIR PETSc_FOUND
++    VERSION_VAR SLEPc_VERSION)
++
++if(SLEPc_FOUND AND NOT TARGET SLEPc::SLEPc)
++    get_filename_component(_slepc_libdir "${SLEPc_LIBRARY}" DIRECTORY)
++    get_filename_component(_petsc_libdir "${PETSc_LIBRARY}" DIRECTORY)
++    _sl_existing_dirs(_slepc_libdirs
++        "${PC_SLEPC_LIBRARY_DIRS};${PC_PETSC_LIBRARY_DIRS};${_slepc_libdir};${_petsc_libdir}")
++    if(PC_SLEPC_LIBRARIES)
++        _sl_resolve_libs(_slepc_libs "${PC_SLEPC_LIBRARIES}" "${_slepc_libdirs}")
++    else()
++        set(_slepc_libs "${SLEPc_LIBRARY}")
++    endif()
++    list(APPEND _slepc_libs PETSc::PETSc)
++
++    _sl_existing_dirs(_slepc_incs
++        "${SLEPc_INCLUDE_DIR};${SLEPc_CONF_INCLUDE_DIR};${PC_SLEPC_INCLUDE_DIRS}")
++
++    add_library(SLEPc::SLEPc INTERFACE IMPORTED)
++    set_target_properties(SLEPc::SLEPc PROPERTIES
++        INTERFACE_INCLUDE_DIRECTORIES "${_slepc_incs}"
++        INTERFACE_LINK_LIBRARIES "${_slepc_libs}")
++
++    # Directories the loader will need at run time. The full private link line
++    # names every dependency PETSc was built against -- MUMPS, BLAS and the rest
++    # -- which is exactly the set of shared libraries the executables will look
++    # for. Nothing is copied; only the paths are recorded.
++    # pkg_check_modules already exposes the static link line; prefer it over
++    # spawning pkg-config again, whose environment would have to be reproduced.
++    set(_rt_line "")
++    foreach(_v PC_SLEPC_STATIC_LDFLAGS PC_SLEPC_STATIC_LDFLAGS_OTHER
++               PC_PETSC_STATIC_LDFLAGS PC_PETSC_STATIC_LDFLAGS_OTHER)
++        if(${_v})
++            string(REPLACE ";" " " _flat "${${_v}}")
++            string(APPEND _rt_line " ${_flat}")
++        endif()
++    endforeach()
++    string(APPEND _rt_line " ${SLEPc_LIBRARY} ${PETSc_LIBRARY}")
++    _sl_runtime_dirs(SLEPc_RUNTIME_DIRS "${_rt_line}")
++    set(SLEPc_RUNTIME_DIRS "${SLEPc_RUNTIME_DIRS}" CACHE INTERNAL
++        "Directories holding the shared libraries needed by SLEPc at run time")
++endif()
++
++mark_as_advanced(SLEPc_INCLUDE_DIR SLEPc_CONF_INCLUDE_DIR SLEPc_LIBRARY)
+diff --git a/cMake/SetupBLAS.cmake b/cMake/SetupBLAS.cmake
+deleted file mode 100644
+index 39fa672e..00000000
+--- a/cMake/SetupBLAS.cmake
++++ /dev/null
+@@ -1,47 +0,0 @@
+-function(ConfigureBLAS TARGET)
+-
+-
+-# Find blas headers:
+-FIND_PATH(BLAS_INCLUDE_PATH
+-    NAMES cblas.h
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/include"
+-    "${PETSC_PATH}/arch-linux2-c-opt/include"
+-    "${PETSC_PATH}/arch-darwin-c-opt/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(BLAS_INCLUDE_PATH)
+-    message(STATUS "Blas header cblas.h found at " ${BLAS_INCLUDE_PATH})
+-else()
+-    message(STATUS "BLAS HEADER CBLAS.H NOT FOUND")
+-endif()
+-
+-
+-# Find blas library:
+-FIND_LIBRARY(BLAS_LIBRARIES
+-    NAMES openblas
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/lib"
+-    "${PETSC_PATH}/arch-linux2-c-opt/lib"
+-    "${PETSC_PATH}/arch-darwin-c-opt/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(BLAS_LIBRARIES)
+-    message(STATUS "Blas library found at " ${BLAS_LIBRARIES})
+-else()
+-    message(STATUS "BLAS LIBRARY NOT FOUND")
+-endif()
+-
+-
+-if(BLAS_INCLUDE_PATH AND BLAS_LIBRARIES)
+-    SET(BLAS_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${BLAS_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${BLAS_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureBLAS)
+-
+diff --git a/cMake/SetupGMSH.cmake b/cMake/SetupGMSH.cmake
+deleted file mode 100644
+index d3b0ba3b..00000000
+--- a/cMake/SetupGMSH.cmake
++++ /dev/null
+@@ -1,43 +0,0 @@
+-function(ConfigureGMSH TARGET)
+-
+-
+-# Find gmsh headers:
+-FIND_PATH(GMSH_INCLUDE_PATH
+-    NAMES gmsh.h
+-    PATHS
+-    "${GMSH_PATH}/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(GMSH_INCLUDE_PATH)
+-    message(STATUS "Gmsh headers found at " ${GMSH_INCLUDE_PATH})
+-else()
+-    message(STATUS "GMSH HEADERS NOT FOUND (OPTIONAL)")
+-endif()
+-
+-
+-# Find gmsh library:
+-FIND_LIBRARY(GMSH_LIBRARIES
+-    NAMES gmsh
+-    PATHS
+-    "${GMSH_PATH}/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(GMSH_LIBRARIES)
+-    message(STATUS "Gmsh library found at " ${GMSH_LIBRARIES})
+-else()
+-    message(STATUS "GMSH LIBRARY NOT FOUND (OPTIONAL)")
+-endif()
+-
+-
+-if(GMSH_INCLUDE_PATH AND GMSH_LIBRARIES)
+-    SET(GMSH_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${GMSH_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${GMSH_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureGMSH)
+-
+diff --git a/cMake/SetupMETIS.cmake b/cMake/SetupMETIS.cmake
+deleted file mode 100644
+index c1ff084b..00000000
+--- a/cMake/SetupMETIS.cmake
++++ /dev/null
+@@ -1,47 +0,0 @@
+-function(ConfigureMETIS TARGET)
+-
+-
+-# Find metis headers:
+-FIND_PATH(METIS_INCLUDE_PATH
+-    NAMES metis.h
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/include"
+-    "${PETSC_PATH}/arch-linux2-c-opt/include"
+-    "${PETSC_PATH}/arch-darwin-c-opt/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(METIS_INCLUDE_PATH)
+-    message(STATUS "Metis headers found at " ${METIS_INCLUDE_PATH})
+-else()
+-    message(STATUS "METIS HEADERS NOT FOUND")
+-endif()
+-
+-
+-# Find metis library:
+-FIND_LIBRARY(METIS_LIBRARIES
+-    NAMES metis
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/lib"
+-    "${PETSC_PATH}/arch-linux2-c-opt/lib"
+-    "${PETSC_PATH}/arch-darwin-c-opt/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(METIS_LIBRARIES)
+-    message(STATUS "Metis library found at " ${METIS_LIBRARIES})
+-else()
+-    message(STATUS "METIS LIBRARY NOT FOUND")
+-endif()
+-
+-
+-if(METIS_INCLUDE_PATH AND METIS_LIBRARIES)
+-    SET(METIS_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${METIS_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${METIS_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureMETIS)
+-
+diff --git a/cMake/SetupMPI.cmake b/cMake/SetupMPI.cmake
+deleted file mode 100644
+index f3fad061..00000000
+--- a/cMake/SetupMPI.cmake
++++ /dev/null
+@@ -1,49 +0,0 @@
+-# Run the default example with MPICH using:
+-#
+-# module avail mpi
+-# module load mpi/mpich-x86_64
+-# mpirun -n 4 ./default
+-
+-function(ConfigureMPI TARGET)
+-
+-
+-# Find mpi headers:
+-FIND_PATH(MPI_INCLUDE_PATH
+-    NAMES mpi.h
+-    PATHS
+-    "${MPI_PATH}/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(MPI_INCLUDE_PATH)
+-    message(STATUS "MPI headers found at " ${MPI_INCLUDE_PATH})
+-else()
+-    message(STATUS "MPI HEADERS NOT FOUND (OPTIONAL)")
+-endif()
+-
+-
+-# Find mpi library:
+-FIND_LIBRARY(MPI_LIBRARIES
+-    NAMES mpi
+-    PATHS
+-    "${MPI_PATH}/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(MPI_LIBRARIES)
+-    message(STATUS "MPI library found at " ${MPI_LIBRARIES})
+-else()
+-    message(STATUS "MPI LIBRARY NOT FOUND (OPTIONAL)")
+-endif()
+-
+-
+-if(MPI_INCLUDE_PATH AND MPI_LIBRARIES)
+-    SET(MPI_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${MPI_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${MPI_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureMPI)
+-
+diff --git a/cMake/SetupMUMPS.cmake b/cMake/SetupMUMPS.cmake
+deleted file mode 100644
+index ee442e39..00000000
+--- a/cMake/SetupMUMPS.cmake
++++ /dev/null
+@@ -1,47 +0,0 @@
+-function(ConfigureMUMPS TARGET)
+-
+-
+-# Find mumps headers:
+-FIND_PATH(MUMPS_INCLUDE_PATH
+-    NAMES cmumps_c.h
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/include"
+-    "${PETSC_PATH}/arch-linux2-c-opt/include"
+-    "${PETSC_PATH}/arch-darwin-c-opt/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(MUMPS_INCLUDE_PATH)
+-    message(STATUS "Mumps headers found at " ${MUMPS_INCLUDE_PATH})
+-else()
+-    message(STATUS "MUMPS HEADERS NOT FOUND")
+-endif()
+-
+-
+-# Find mumps library:
+-FIND_LIBRARY(MUMPS_LIBRARIES
+-    NAMES cmumps
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/lib"
+-    "${PETSC_PATH}/arch-linux2-c-opt/lib"
+-    "${PETSC_PATH}/arch-darwin-c-opt/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(MUMPS_LIBRARIES)
+-    message(STATUS "Mumps library found at " ${MUMPS_LIBRARIES})
+-else()
+-    message(STATUS "MUMPS LIBRARY NOT FOUND")
+-endif()
+-
+-
+-if(MUMPS_INCLUDE_PATH AND MUMPS_LIBRARIES)
+-    SET(MUMPS_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${MUMPS_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${MUMPS_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureMUMPS)
+-
+diff --git a/cMake/SetupPETSC.cmake b/cMake/SetupPETSC.cmake
+deleted file mode 100644
+index 24bd6081..00000000
+--- a/cMake/SetupPETSC.cmake
++++ /dev/null
+@@ -1,60 +0,0 @@
+-function(ConfigurePETSC TARGET)
+-
+-
+-# Find petsc headers:
+-FIND_PATH(PETSC_INCLUDE_PATH
+-    NAMES petsc.h
+-    PATHS
+-    "${PETSC_PATH}/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(PETSC_INCLUDE_PATH)
+-    message(STATUS "Petsc header petsc.h found at " ${PETSC_INCLUDE_PATH})
+-else()
+-    message(STATUS "PETSC HEADER PETSC.H NOT FOUND")
+-endif()
+-
+-FIND_PATH(PETSCCONF_INCLUDE_PATH
+-    NAMES petscconf.h
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/include"
+-    "${PETSC_PATH}/arch-linux2-c-opt/include"
+-    "${PETSC_PATH}/arch-darwin-c-opt/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(PETSCCONF_INCLUDE_PATH)
+-    message(STATUS "Petsc header petscconf.h found at " ${PETSCCONF_INCLUDE_PATH})
+-else()
+-    message(STATUS "PETSC HEADER PETSCCONF.H NOT FOUND")
+-endif()
+-
+-
+-# Find petsc library:
+-FIND_LIBRARY(PETSC_LIBRARIES
+-    NAMES petsc
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/lib"
+-    "${PETSC_PATH}/arch-linux2-c-opt/lib"
+-    "${PETSC_PATH}/arch-darwin-c-opt/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(PETSC_LIBRARIES)
+-    message(STATUS "Petsc library found at " ${PETSC_LIBRARIES})
+-else()
+-    message(STATUS "PETSC LIBRARY NOT FOUND")
+-endif()
+-
+-
+-if(PETSC_INCLUDE_PATH AND PETSCCONF_INCLUDE_PATH AND PETSC_LIBRARIES)
+-    SET(PETSC_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${PETSC_INCLUDE_PATH} ${PETSCCONF_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${PETSC_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigurePETSC)
+-
+diff --git a/cMake/SetupSLEPC.cmake b/cMake/SetupSLEPC.cmake
+deleted file mode 100644
+index e57dbff8..00000000
+--- a/cMake/SetupSLEPC.cmake
++++ /dev/null
+@@ -1,47 +0,0 @@
+-function(ConfigureSLEPC TARGET)
+-
+-
+-# Find slepc headers:
+-FIND_PATH(SLEPC_INCLUDE_PATH
+-    NAMES slepc.h
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/include"
+-    "${PETSC_PATH}/arch-linux2-c-opt/include"
+-    "${PETSC_PATH}/arch-darwin-c-opt/include"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(SLEPC_INCLUDE_PATH)
+-    message(STATUS "Slepc headers found at " ${SLEPC_INCLUDE_PATH})
+-else()
+-    message(STATUS "SLEPC HEADERS NOT FOUND")
+-endif()
+-
+-
+-# Find slepc library:
+-FIND_LIBRARY(SLEPC_LIBRARIES
+-    NAMES slepc
+-    PATHS
+-    "${PETSC_PATH}/arch-linux-c-opt/lib"
+-    "${PETSC_PATH}/arch-linux2-c-opt/lib"
+-    "${PETSC_PATH}/arch-darwin-c-opt/lib"
+-    NO_DEFAULT_PATH
+-    )
+-
+-if(SLEPC_LIBRARIES)
+-    message(STATUS "Slepc library found at " ${SLEPC_LIBRARIES})
+-else()
+-    message(STATUS "SLEPC LIBRARY NOT FOUND")
+-endif()
+-
+-
+-if(SLEPC_INCLUDE_PATH AND SLEPC_LIBRARIES)
+-    SET(SLEPC_FOUND YES PARENT_SCOPE)
+-
+-    TARGET_INCLUDE_DIRECTORIES(${TARGET} PUBLIC ${SLEPC_INCLUDE_PATH})
+-    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ${SLEPC_LIBRARIES})
+-endif()
+-
+-
+-endfunction(ConfigureSLEPC)
+-
+diff --git a/cMake/functions.cmake b/cMake/functions.cmake
+index cbb7657f..9dde8e1d 100644
+--- a/cMake/functions.cmake
++++ b/cMake/functions.cmake
+@@ -1,20 +1,23 @@
+-# Add library for dirs
++# Helper functions shared by the sparselizard build.
++
++# Collect sources from a list of directories and create the library target.
++# Honours the standard BUILD_SHARED_LIBS switch instead of forcing SHARED.
+ function(custom_add_library_from_dir TARGET DIRLIST)
+     foreach(d IN LISTS DIRLIST)
+         file(GLOB SRC "${d}/*.cpp" "${d}/*.h" "${d}/*.hpp")
+         list(APPEND TARGET_SRC ${SRC})
+     endforeach()
+-    add_library(${TARGET} SHARED ${TARGET_SRC})
+-endfunction(custom_add_library_from_dir)
++    add_library(${TARGET} ${TARGET_SRC})
++endfunction()
+ 
+-# Add executable for dirs
++# Collect sources from a list of directories and create an executable target.
+ function(custom_add_executable_from_dir TARGET DIRLIST)
+     foreach(d IN LISTS DIRLIST)
+         file(GLOB SRC "${d}/*.cpp" "${d}/*.h" "${d}/*.hpp")
+         list(APPEND TARGET_SRC ${SRC})
+     endforeach()
+     add_executable(${TARGET} ${TARGET_SRC})
+-endfunction(custom_add_executable_from_dir)
++endfunction()
+ 
+ function(custom_copy_file TARGET FROMDIRS TODIR GLOBS)
+     foreach(d IN LISTS FROMDIRS)
+@@ -26,8 +29,11 @@ function(custom_copy_file TARGET FROMDIRS TODIR GLOBS)
+             endforeach()
+         endforeach()
+     endforeach()
+-endfunction(custom_copy_file)
++endfunction()
+ 
++# Copy data files next to a target. The original implementation created symbolic
++# links, which need developer mode or elevation on Windows; a copy behaves the
++# same everywhere.
+ function(custom_symlink_file TARGET FROMDIRS TODIR GLOBS)
+     foreach(d IN LISTS FROMDIRS)
+         foreach(g IN LISTS GLOBS)
+@@ -35,11 +41,123 @@ function(custom_symlink_file TARGET FROMDIRS TODIR GLOBS)
+             foreach(f IN LISTS SRC)
+                 get_filename_component(filename ${f} NAME)
+                 if(NOT ${filename} STREQUAL "CMakeLists.txt")
+-                    string(REGEX REPLACE "^.*/" "" DEST ${f})
+-                    file(CREATE_LINK ${f} ${TODIR}/${DEST} SYMBOLIC)
++                    configure_file(${f} ${TODIR}/${filename} COPYONLY)
+                 endif()
+             endforeach()
+         endforeach()
+     endforeach()
+-endfunction(custom_symlink_file)
++endfunction()
++
++# Bring an MSYS/Cygwin style path back to its native form.
++#
++# A PETSc or SLEPc configured from an MSYS2 shell records POSIX paths in its .pc
++# file ("/d/Work/..."), and a MUMPS reached through PETSc's private link line is
++# named the same way. A native CMake resolves none of those, and would silently
++# drop them. The /<letter>/ prefix maps to <letter>:/ and nothing else changes.
++function(_sl_native_path OUT_VAR P)
++    set(_p "${P}")
++    if(WIN32 AND NOT EXISTS "${_p}" AND _p MATCHES "^/([a-zA-Z])/(.*)$")
++        set(_p "${CMAKE_MATCH_1}:/${CMAKE_MATCH_2}")
++    endif()
++    set(${OUT_VAR} "${_p}" PARENT_SCOPE)
++endfunction()
++
++# Keep only the directories that actually exist.
++#
++# pkg-config reports whatever was baked into the .pc file at configure time. A
++# PETSc configured from an MSYS2 shell records POSIX paths ("/d/Work/..."), which
++# a native CMake cannot resolve; CMake then rejects the imported target outright.
++# Discarding the unusable entries leaves the ones found by find_path/find_library,
++# which are native by construction.
++function(_sl_existing_dirs OUT_VAR DIRS)
++    set(_kept)
++    foreach(_d IN LISTS DIRS)
++        _sl_native_path(_d "${_d}")
++        if(IS_DIRECTORY "${_d}")
++            list(APPEND _kept "${_d}")
++        endif()
++    endforeach()
++    if(_kept)
++        list(REMOVE_DUPLICATES _kept)
++    endif()
++    set(${OUT_VAR} "${_kept}" PARENT_SCOPE)
++endfunction()
++
++# Derive, from a link line, the directories that must be on the loader path at
++# run time.
++#
++# On Windows the import library and the DLL rarely sit together: oneMKL and the
++# MUMPS superbuild put the .lib in lib/ and the .dll in the sibling bin/. Both
++# candidates are therefore considered, and only the ones actually holding a
++# shared library are kept.
++#
++#   _sl_runtime_dirs(<out_var> "<link line>")
++function(_sl_runtime_dirs OUT_VAR LINE)
++    string(REPLACE " " ";" _items "${LINE}")
++    set(_cand)
++    foreach(_it IN LISTS _items)
++        if(_it MATCHES "^-L(.+)$")
++            _sl_native_path(_d "${CMAKE_MATCH_1}")
++            list(APPEND _cand "${_d}")
++        elseif(IS_ABSOLUTE "${_it}" AND _it MATCHES "\\.(lib|a|so|dylib)$")
++            _sl_native_path(_it "${_it}")
++            get_filename_component(_d "${_it}" DIRECTORY)
++            list(APPEND _cand "${_d}")
++        endif()
++    endforeach()
+ 
++    set(_dirs)
++    foreach(_d IN LISTS _cand)
++        get_filename_component(_parent "${_d}" DIRECTORY)
++        foreach(_try "${_d}" "${_parent}/bin")
++            if(IS_DIRECTORY "${_try}")
++                file(GLOB _shared "${_try}/*.dll" "${_try}/*.so*" "${_try}/*.dylib")
++                if(_shared)
++                    get_filename_component(_abs "${_try}" ABSOLUTE)
++                    list(APPEND _dirs "${_abs}")
++                endif()
++            endif()
++        endforeach()
++    endforeach()
++    if(_dirs)
++        list(REMOVE_DUPLICATES _dirs)
++    endif()
++    set(${OUT_VAR} "${_dirs}" PARENT_SCOPE)
++endfunction()
++
++# Turn a pkg-config style link interface into absolute library paths.
++#
++# pkg-config yields bare names ("-lpetsc"). Passing those straight to the linker
++# breaks in two common cases: the MSVC linker has no -l, and icx in its clang-cl
++# mode silently *ignores* -l and still returns 0, so a missing library surfaces
++# much later as an unresolved symbol. Resolving every name to a full path with
++# find_library keeps the behaviour identical on every toolchain.
++#
++#   _sl_resolve_libs(<out_var> "<names>" "<dirs>")
++function(_sl_resolve_libs OUT_VAR NAMES DIRS)
++    set(_resolved)
++    foreach(_name IN LISTS NAMES)
++        if(IS_ABSOLUTE "${_name}" OR _name MATCHES "\\.(lib|a|so|dylib)$")
++            list(APPEND _resolved "${_name}")
++            continue()
++        endif()
++        # "lib" prefix is not implicit for MSVC-style toolchains, hence lib${_name}.
++        find_library(_sl_lib_${_name}
++            NAMES ${_name} lib${_name}
++            HINTS ${DIRS}
++            NO_DEFAULT_PATH)
++        if(_sl_lib_${_name})
++            list(APPEND _resolved "${_sl_lib_${_name}}")
++        else()
++            find_library(_sl_sys_${_name} NAMES ${_name} lib${_name})
++            if(_sl_sys_${_name})
++                list(APPEND _resolved "${_sl_sys_${_name}}")
++            else()
++                # Leave it to the linker: system libraries such as Kernel32 have
++                # no import library to locate on the search paths we were given.
++                list(APPEND _resolved "${_name}")
++            endif()
++        endif()
++    endforeach()
++    set(${OUT_VAR} "${_resolved}" PARENT_SCOPE)
++endfunction()
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+new file mode 100644
+index 00000000..058b6e5b
+--- /dev/null
++++ b/examples/CMakeLists.txt
+@@ -0,0 +1,90 @@
++# One executable per examples/<name>/main.cpp, discovered rather than listed, so
++# that adding an example needs no edit here.
++#
++# Layout produced in the build tree:
++#
++#   bin/<name>            every executable, next to the shared library
++#   examples/<name>/      one working directory per example
++#
++# The split is forced by the examples themselves: they reference their mesh
++# relatively, as in mesh("1d.msh"), and write their results relatively too, as in
++# write(all, "u.vtu", 2). Several examples use the same file names -- disk.msh,
++# quad.msh, cmut2d.msh, u.vtu -- so a shared working directory would have them
++# overwrite each other. The binaries, on the other hand, are all unique and can
++# share one directory, which is what keeps a single copy of the shared library.
++
++file(GLOB _example_mains CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*/main.cpp")
++list(SORT _example_mains)
++
++# Loader search path for the tests. CTest applies this per test, so running an
++# example needs no prepared shell and no copied library: the third-party shared
++# libraries stay where they were installed and only their directories travel.
++if(WIN32)
++    set(_path_var PATH)
++elseif(APPLE)
++    set(_path_var DYLD_LIBRARY_PATH)
++else()
++    set(_path_var LD_LIBRARY_PATH)
++endif()
++
++set(_env_mod)
++foreach(_d IN LISTS SPARSELIZARD_RUNTIME_PATHS)
++    file(TO_NATIVE_PATH "${_d}" _nd)
++    list(APPEND _env_mod "${_path_var}=path_list_prepend:${_nd}")
++endforeach()
++
++set(_example_targets)
++
++set(_skipped_examples)
++
++foreach(_main IN LISTS _example_mains)
++    get_filename_component(_dir "${_main}" DIRECTORY)
++    get_filename_component(_name "${_dir}" NAME)
++
++    # An example that reaches for an optional dependency cannot be built when
++    # that dependency is off. Read the requirement from the source instead of
++    # maintaining a list here, so that a failure means a real defect rather than
++    # a disabled option.
++    file(READ "${_main}" _src)
++    if(_src MATCHES "gmsh\\.h" AND NOT SPARSELIZARD_ENABLE_GMSH)
++        list(APPEND _skipped_examples "${_name} (needs SPARSELIZARD_ENABLE_GMSH)")
++        continue()
++    endif()
++
++    add_executable(${_name} "${_main}")
++    target_link_libraries(${_name} PRIVATE sparselizard)
++    list(APPEND _example_targets ${_name})
++
++    # Stage the data files next to nothing but themselves.
++    set(_workdir "${CMAKE_BINARY_DIR}/examples/${_name}")
++    file(MAKE_DIRECTORY "${_workdir}")
++
++    file(GLOB _data "${_dir}/*")
++    foreach(_f IN LISTS _data)
++        if(NOT IS_DIRECTORY "${_f}" AND NOT _f STREQUAL _main)
++            get_filename_component(_fn "${_f}" NAME)
++            configure_file("${_f}" "${_workdir}/${_fn}" COPYONLY)
++        endif()
++    endforeach()
++
++    # Running an example is then a matter of ctest -R <name>, which takes care of
++    # the working directory. Started by hand it is
++    #   cd examples/<name> && ../../bin/<name>
++    add_test(NAME ${_name}
++             COMMAND $<TARGET_FILE:${_name}>
++             WORKING_DIRECTORY "${_workdir}")
++    set_tests_properties(${_name} PROPERTIES
++        ENVIRONMENT_MODIFICATION "${_env_mod}"
++        TIMEOUT 600)
++endforeach()
++
++# Convenience target: build every example without building anything else.
++if(_example_targets)
++    add_custom_target(examples DEPENDS ${_example_targets})
++    list(LENGTH _example_targets _n)
++    message(STATUS "Examples: ${_n} target(s)")
++endif()
++
++foreach(_s IN LISTS _skipped_examples)
++    message(STATUS "Examples: skipping ${_s}")
++endforeach()
+diff --git a/examples/circuit-coupling-rlc-harmonic/main.cpp b/examples/circuit-coupling-rlc-harmonic/main.cpp
+index 87018806..0be1a0cd 100644
+--- a/examples/circuit-coupling-rlc-harmonic/main.cpp
++++ b/examples/circuit-coupling-rlc-harmonic/main.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include "sparselizard.h"
+ 
++#include <complex>
++
+ 
+ using namespace sl;
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f0242d80..bc6680b9 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -19,58 +19,131 @@ set(SRC_DIR_LIST
+   ${CMAKE_CURRENT_SOURCE_DIR}/gausspoint)
+ 
+ custom_add_library_from_dir(sparselizard "${SRC_DIR_LIST}")
+-
+-custom_copy_file(sparselizard "${SRC_DIR_LIST}" "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/include" "*.h")
++custom_copy_file(sparselizard "${SRC_DIR_LIST}" "${SPARSELIZARD_INCLUDE_STAGE_DIR}" "*.h")
+ 
+ target_include_directories(sparselizard PUBLIC ${SRC_DIR_LIST})
++target_compile_features(sparselizard PUBLIC cxx_std_11)
+ 
+-target_compile_features(sparselizard PRIVATE cxx_std_11)
+-target_compile_options(sparselizard PUBLIC -fPIC -no-pie -O3)
+-
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
++# --- Required dependencies ---------------------------------------------------
++find_package(PETSc REQUIRED)
++find_package(SLEPc REQUIRED)
++find_package(CBLAS REQUIRED)
+ 
+-ConfigureMPI(sparselizard)
+-ConfigureGMSH(sparselizard)
+-ConfigureBLAS(sparselizard)
+-ConfigureMETIS(sparselizard)
+-ConfigureMUMPS(sparselizard)
+-ConfigurePETSC(sparselizard)
+-ConfigureSLEPC(sparselizard)
++target_link_libraries(sparselizard PUBLIC SLEPc::SLEPc PETSc::PETSc CBLAS::CBLAS)
++target_compile_definitions(sparselizard PUBLIC HAVE_PETSC HAVE_SLEPC HAVE_BLAS)
+ 
+-# Optional for std::thread
+-# find_package(Threads)
+-# target_link_libraries(sparselizard PUBLIC ${CMAKE_THREAD_LIBS_INIT})
+-
+-if(NOT (${BLAS_FOUND} AND ${METIS_FOUND} AND ${MUMPS_FOUND} AND ${PETSC_FOUND} AND ${SLEPC_FOUND}))
+-    message(FATAL_ERROR "\nAt least one required package (blas, metis, mumps, petsc, slepc) not found.")
++# --- Optional dependencies ---------------------------------------------------
++if(SPARSELIZARD_ENABLE_MPI)
++    find_package(MPI REQUIRED COMPONENTS CXX)
++    target_link_libraries(sparselizard PUBLIC MPI::MPI_CXX)
++    target_compile_definitions(sparselizard PUBLIC HAVE_MPI)
++else()
++    # slmpi.cpp includes <mpi.h> unconditionally. A PETSc configured with
++    # --with-mpi=0 ships the MPIUNI stub for exactly this case; without it the
++    # header has to come from somewhere else.
++    find_path(MPIUNI_INCLUDE_DIR
++        NAMES mpi.h
++        HINTS "${PETSC_DIR}/include/petsc/mpiuni"
++        NO_DEFAULT_PATH)
++    if(MPIUNI_INCLUDE_DIR)
++        target_include_directories(sparselizard PUBLIC ${MPIUNI_INCLUDE_DIR})
++        message(STATUS "MPI disabled, using the PETSc MPIUNI stub at ${MPIUNI_INCLUDE_DIR}")
++    else()
++        message(WARNING
++            "MPI is disabled and no MPIUNI stub was found under PETSC_DIR. "
++            "src/slmpi.cpp includes <mpi.h> and will not compile. Either enable "
++            "SPARSELIZARD_ENABLE_MPI or point PETSC_DIR at a PETSc built with --with-mpi=0.")
++    endif()
+ endif()
+ 
+-# set configure file
+-if(${BLAS_FOUND})
+-    add_definitions(-DHAVE_BLAS)
+-endif()
+-if(${GMSH_FOUND})
+-    add_definitions(-DHAVE_GMSH)
+-endif()
+-if(${METIS_FOUND})
+-    add_definitions(-DHAVE_METIS)
+-endif()
+-if(${MPI_FOUND})
+-    add_definitions(-DHAVE_MPI)
+-endif()
+-if(${MUMPS_FOUND})
+-    add_definitions(-DHAVE_MUMPS)
+-endif()
+-if(${PETSC_FOUND})
+-    add_definitions(-DHAVE_PETSC)
++if(SPARSELIZARD_ENABLE_GMSH)
++    find_package(GMSH REQUIRED)
++    target_link_libraries(sparselizard PUBLIC GMSH::GMSH)
++    target_compile_definitions(sparselizard PUBLIC HAVE_GMSH)
+ endif()
+-if(${SLEPC_FOUND})
+-    add_definitions(-DHAVE_SLEPC)
++
++if(SPARSELIZARD_ENABLE_OPENMP)
++    find_package(OpenMP REQUIRED COMPONENTS CXX)
++    target_link_libraries(sparselizard PUBLIC OpenMP::OpenMP_CXX)
+ endif()
+ 
+ target_include_directories(sparselizard PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+ 
++# --- Runtime search path ------------------------------------------------------
++# Third-party shared libraries stay where they were installed; only their
++# directories are recorded, so nothing has to be copied or kept in sync. The
++# list feeds the CTest environment and the generated helper script below, and is
++# a cache variable so that an extra directory can be appended by hand.
++set(_rt_dirs ${SLEPc_RUNTIME_DIRS})
++get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
++if(IS_DIRECTORY "${_cxx_bin}")
++    list(APPEND _rt_dirs "${_cxx_bin}")   # libmmd, svml_dispmd, libifcoremd
++endif()
++foreach(_b IN LISTS BLAS_LIBRARIES)
++    if(IS_ABSOLUTE "${_b}")
++        get_filename_component(_bd "${_b}" DIRECTORY)
++        get_filename_component(_bp "${_bd}" DIRECTORY)
++        foreach(_try "${_bd}" "${_bp}/bin")
++            if(IS_DIRECTORY "${_try}")
++                list(APPEND _rt_dirs "${_try}")
++            endif()
++        endforeach()
++    endif()
++endforeach()
++# Only the additions are a cache entry. The derived part is recomputed at every
++# configure: a plain "set(... CACHE ...)" never overwrites an existing entry, so
++# caching the derived list would freeze the first result and quietly ignore any
++# later correction.
++set(SPARSELIZARD_RUNTIME_PATHS_EXTRA "" CACHE STRING
++    "Extra directories to add to the loader search path when running the binaries")
++list(APPEND _rt_dirs ${SPARSELIZARD_RUNTIME_PATHS_EXTRA})
++list(REMOVE_DUPLICATES _rt_dirs)
++set(SPARSELIZARD_RUNTIME_PATHS "${_rt_dirs}" PARENT_SCOPE)
++set(SPARSELIZARD_RUNTIME_PATHS "${_rt_dirs}")
++
++message(STATUS "Runtime search path:")
++foreach(_d IN LISTS SPARSELIZARD_RUNTIME_PATHS)
++    message(STATUS "    ${_d}")
++endforeach()
++
++# A small helper for running a binary by hand, outside ctest. Sourcing it is the
++# only manual step, and it is generated from the same list, so it cannot drift.
++if(WIN32)
++    set(_env_script "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sparselizard-env.cmd")
++    set(_body "@echo off\r\nrem Generated by CMake -- prepends the dependency directories to PATH.\r\n")
++    foreach(_d IN LISTS SPARSELIZARD_RUNTIME_PATHS)
++        file(TO_NATIVE_PATH "${_d}" _nd)
++        string(APPEND _body "set \"PATH=${_nd};%PATH%\"\r\n")
++    endforeach()
++    string(APPEND _body "echo sparselizard: dependency directories added to PATH\r\n")
++else()
++    set(_env_script "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sparselizard-env.sh")
++    set(_body "# Generated by CMake -- source this file.\n")
++    foreach(_d IN LISTS SPARSELIZARD_RUNTIME_PATHS)
++        string(APPEND _body "export LD_LIBRARY_PATH=\"${_d}:\${LD_LIBRARY_PATH}\"\n")
++    endforeach()
++endif()
++file(WRITE "${_env_script}" "${_body}")
++message(STATUS "Runtime helper .... ${_env_script}")
++
+ install(TARGETS sparselizard)
+-install(DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/include/"
++install(DIRECTORY "${SPARSELIZARD_INCLUDE_STAGE_DIR}/"
+         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/sparselizard"
+         FILES_MATCHING PATTERN "*.h")
++
++# --- Configuration summary ---------------------------------------------------
++# Emitted here rather than at the top level: the find_package results live in
++# this scope.
++message(STATUS "")
++message(STATUS "Sparselizard configuration")
++message(STATUS "  build type ........ ${CMAKE_BUILD_TYPE}")
++message(STATUS "  shared library .... ${BUILD_SHARED_LIBS}")
++message(STATUS "  C++ compiler ...... ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
++message(STATUS "  PETSc ............. ${PETSc_VERSION}  ${PETSc_LIBRARY}")
++message(STATUS "  SLEPc ............. ${SLEPc_VERSION}  ${SLEPc_LIBRARY}")
++message(STATUS "  BLAS .............. ${BLAS_LIBRARIES}")
++message(STATUS "  cblas header ...... ${CBLAS_INCLUDE_DIR}/${CBLAS_HEADER_NAME}")
++message(STATUS "  OpenMP ............ ${SPARSELIZARD_ENABLE_OPENMP}")
++message(STATUS "  MPI ............... ${SPARSELIZARD_ENABLE_MPI}")
++message(STATUS "  Gmsh .............. ${SPARSELIZARD_ENABLE_GMSH}")
++message(STATUS "")
+diff --git a/src/universe.cpp b/src/universe.cpp
+index c20ade34..bf73db2b 100755
+--- a/src/universe.cpp
++++ b/src/universe.cpp
+@@ -1,7 +1,9 @@
+ #include "universe.h"
+ #include "slepc.h"
+ #include <thread>
++#ifdef _OPENMP
+ #include <omp.h>
++#endif
+ 
+ 
+ wallclock universe::globalclock = wallclock();
+@@ -53,7 +55,9 @@ int universe::getmaxnumthreads(void)
+ 
+ void universe::setmaxnumthreads(int mnt)
+ {
++#ifdef _OPENMP
+     omp_set_num_threads(mnt);
++#endif
+     maxnumthreads = mnt;
+ }
+ 

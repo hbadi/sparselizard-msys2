@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Thu, 6 Aug 2026 15:22:32 +0200
+Subject: [PATCH 4/6] Fall back to PETSc's own LU when the requested solver is
+ absent
+
+sparselizard asks PETSc for MUMPS by name. PETSc only provides it when it was
+configured with it, and several distributions ship one that was not: the MSYS2
+package, for one, carries no direct solver beyond PETSc's own.
+
+Nothing about that is visible at build time, since the request is a string and
+never a symbol. It surfaces at the first direct solve, as a PETSc error stack
+and a result of nan:
+
+  Could not locate solver type mumps for factorization type LU and matrix type
+  seqaij. Perhaps you must ./configure with --download-mumps
+
+Ask PETSc whether the solver is registered, once, and use its built-in LU when
+it is not. A build against a PETSc without MUMPS is a perfectly usable build,
+so this is silent: the choice was made by whoever installed PETSc, not by
+whoever runs the program, and a message on every run would be noise. What is
+lost is speed, PETSc's LU being slower and strictly sequential.
+
+Measured on MSYS2/MinGW64 against petsc 3.25.1 built without MUMPS:
+examples/capacitance-computing returned nan before and returns its expected
+1.30634e-10 after.
+
+(cherry picked from commit 2d5aeb9c74d52d71e2b87737b51664f6fca9e682)
+---
+ src/expression/operation/sl.cpp |  4 ++--
+ src/resolution/eigenvalue.cpp   |  4 ++--
+ src/universe.cpp                | 31 +++++++++++++++++++++++++++++++
+ src/universe.h                  |  6 ++++++
+ 4 files changed, 41 insertions(+), 4 deletions(-)
+
+diff --git a/src/expression/operation/sl.cpp b/src/expression/operation/sl.cpp
+index 50bc04d1..d693527a 100755
+--- a/src/expression/operation/sl.cpp
++++ b/src/expression/operation/sl.cpp
+@@ -1610,7 +1610,7 @@ vec sl::solve(mat A, vec b, std::string soltype, bool diagscaling)
+             PCSetType(pc,PCLU);
+         if (soltype == "cholesky")
+             PCSetType(pc,PCCHOLESKY);
+-        PCFactorSetMatSolverType(pc, universe::solvertype);
++        PCFactorSetMatSolverType(pc, universe::getsolvertype());
+     }
+ 
+     KSPSolve(*ksp, bpetsc, solpetsc);
+@@ -1713,7 +1713,7 @@ densemat sl::solve(mat A, densemat b, std::string soltype)
+             PCSetType(pc,PCLU);
+         if (soltype == "cholesky")
+             PCSetType(pc,PCCHOLESKY);
+-        PCFactorSetMatSolverType(pc, universe::solvertype);
++        PCFactorSetMatSolverType(pc, universe::getsolvertype());
+         PCSetUp(pc);
+     }
+     else
+diff --git a/src/resolution/eigenvalue.cpp b/src/resolution/eigenvalue.cpp
+index b4e7bec9..ec3b9869 100644
+--- a/src/resolution/eigenvalue.cpp
++++ b/src/resolution/eigenvalue.cpp
+@@ -77,7 +77,7 @@ void eigenvalue::compute(int numeigenvaluestocompute, double targeteigenvaluemag
+         PC pc;
+         KSPGetPC(ksp, &pc);
+         PCSetType(pc, PCLU);
+-        PCFactorSetMatSolverType(pc, universe::solvertype);
++        PCFactorSetMatSolverType(pc, universe::getsolvertype());
+         
+         // DO THE ACTUAL RESOLUTION:
+         EPSSolve( eps );
+@@ -152,7 +152,7 @@ void eigenvalue::compute(int numeigenvaluestocompute, double targeteigenvaluemag
+         PEPSTOARSetDetectZeros(pep,PETSC_TRUE);
+         PEPSetScale(pep, PEP_SCALE_SCALAR, PETSC_DECIDE, PETSC_NULLPTR, PETSC_NULLPTR, PETSC_DECIDE, PETSC_DECIDE);
+ 
+-        PCFactorSetMatSolverType(pc, universe::solvertype);
++        PCFactorSetMatSolverType(pc, universe::getsolvertype());
+         PEPSetFromOptions(pep);
+         PEPSetUp(pep);
+ 
+diff --git a/src/universe.cpp b/src/universe.cpp
+index bf73db2b..eb8c6383 100755
+--- a/src/universe.cpp
++++ b/src/universe.cpp
+@@ -10,6 +10,37 @@ wallclock universe::globalclock = wallclock();
+ 
+ MatSolverType universe::solvertype = "mumps";
+ 
++MatSolverType universe::getsolvertype(void)
++{
++    // Resolved once: the set of registered solvers does not change during a run,
++    // and asking PETSc on every factorisation would be wasteful.
++    static MatSolverType resolved = NULL;
++    if (resolved != NULL)
++        return resolved;
++
++    resolved = solvertype;
++
++    // MatSolverTypeGet reports whether the solver was registered at all, which
++    // is what distinguishes a PETSc built without it from one that has it but
++    // cannot apply it to this matrix. Asking for it directly is the only way to
++    // know: the alternative is letting MatGetFactor() fail inside the solve,
++    // where the error surfaces as a nan rather than as a diagnostic.
++    PetscBool hastype = PETSC_FALSE, hasmattype = PETSC_FALSE;
++    MatSolverTypeGet(solvertype, MATSEQAIJ, MAT_FACTOR_LU, &hastype, &hasmattype, NULL);
++
++    if (hastype == PETSC_FALSE)
++    {
++        // Silently, and deliberately. A build against a PETSc without the
++        // requested solver is a perfectly usable build; PETSc's own LU is
++        // always registered. It is slower and strictly sequential, which is
++        // worth knowing but not worth a message on every run: the choice is
++        // made by whoever installed PETSc, not by whoever runs this.
++        resolved = MATSOLVERPETSC;
++    }
++
++    return resolved;
++}
++
+ int universe::mynumrawmeshes = 0;
+ 
+ void universe::addtorawmeshcounter(int val)
+diff --git a/src/universe.h b/src/universe.h
+index f185fe3e..cdb84cae 100755
+--- a/src/universe.h
++++ b/src/universe.h
+@@ -33,7 +33,13 @@ class universe
+ 
+         static wallclock globalclock;
+ 
++        // The direct solver PETSc is asked for. MUMPS by default, which PETSc
++        // only provides when it was configured with it; several distributions
++        // ship one that was not. Read it through getsolvertype(), which falls
++        // back to a solver that is always there rather than letting the solve
++        // fail.
+         static MatSolverType solvertype;
++        static MatSolverType getsolvertype(void);
+ 
+         static int mynumrawmeshes;
+         static void addtorawmeshcounter(int val);
