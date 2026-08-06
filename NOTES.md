@@ -19,11 +19,13 @@ pas supposé. Ce qui reste une hypothèse est signalé comme tel.
 - La **chaîne complète** est prouvée sur les deux environnements gcc : une application consommant
   le paquet par `find_package` résout **à travers MUMPS**, valeur `1.30634e-10`.
 
+- Le blocage clang est **imputé à OpenMP**, discriminant joué : en `dso`, qui ne lie aucun runtime
+  OpenMP, **les quatre** saveurs résolvent à travers MUMPS en une centaine de millisecondes. Voir §5.
+
 **Non résolu :**
 
-- La chaîne **clang/flang bloque dans le solve** — 22 minutes sur un problème qui prend 3 secondes
-  en gcc. Ce n'est pas ARM : `clang64` est du x86_64 et bloque aussi. Discriminant préparé mais
-  non joué, voir §5.
+- Le **mécanisme** du blocage. On sait ce qui le déclenche — OpenMP — pas ce qui se passe. Il reste
+  donc entier en `dto`, la variante que le paquet sparselizard utilise.
 
 **Non fait :**
 
@@ -200,42 +202,83 @@ l'amont ; un bouton ajouté pour une expérience y serait du bruit. Le workflow 
 
 ---
 
-## 5. Le blocage clang, non résolu
+## 5. Le blocage clang — le déclencheur est OpenMP
+
+En `dto`, variante OpenMP ([run 31124882570][r-dto]) :
 
 ```
-MINGW64  (gcc)    3 s      solver used : mumps    PASS
-UCRT64   (gcc)    3 s      solver used : mumps    PASS
-CLANG64  (flang)  22 min   bloque dans le solve
+MINGW64  (gcc)    ~191 ms   solver used : mumps    PASS
+UCRT64   (gcc)    ~142 ms   solver used : mumps    PASS
+CLANG64  (flang)  22 min    bloque dans le solve
 CLANGARM64        bloque de même
 ```
 
-Le journal s'arrête après le chargement du maillage : **ça bloque dans le solve**.
-Ce n'est **pas** l'architecture — `clang64` est du x86_64.
+Le journal s'arrêtait après le chargement du maillage : **ça bloquait dans le solve**.
+Ce n'était **pas** l'architecture — `clang64` est du x86_64.
 
-Piste, relevée sur la chaîne gcc :
+> Le « 3 s » noté à la session précédente mesurait l'étape entière — compilation, édition de liens
+> et exécution — pas la résolution. Repris ici sur le même intervalle que le tableau `dso`
+> ci-dessous, du chargement du maillage à l'affichage du solveur, pour que les deux soient
+> comparables. **OpenMP ne coûte rien de mesurable sur gcc** : 142 à 191 ms contre 109 à 112 ms
+> sans lui, sur un cas trop petit pour que le parallélisme rapporte quoi que ce soit.
+
+**Discriminant joué** ([run 31128088908][r-dso]) : la variante `dso` ne lie aucun runtime OpenMP,
+ni côté PETSc ni côté MUMPS. Relancée sur les quatre saveurs, elle donne
+
+| environnement | Fortran | solveur | valeur | durée du solve |
+| --- | --- | --- | --- | --- |
+| MINGW64 | gfortran | `mumps` | 1.30634e-10 | ~112 ms |
+| UCRT64 | gfortran | `mumps` | 1.30634e-10 | ~109 ms |
+| CLANG64 | flang | `mumps` | 1.30634e-10 | ~103 ms |
+| CLANGARM64 | flang | `mumps` | 1.30634e-10 | ~89 ms |
+
+Durée relevée entre la dernière ligne du chargement du maillage et l'affichage du solveur, la
+résolution se faisant à la première factorisation. Les quatre sont dans la même bande : avec `dso`
+il n'y a plus **aucun** écart entre gcc et flang. Le blocage ne se réduit pas, il disparaît.
+
+`petscconf.h` confirme que le discriminant a retiré ce qu'il devait retirer, et gardé le reste :
 
 ```
-libmumps-dto.dll  ->  libgfortran-5, libgomp-1, libmetis, libscotch
-libpetsc-dto.dll  ->  libgfortran-5, libgomp-1
+PETSC_HAVE_PACKAGES ":blaslapack:hwloc:mathlib:mpi:mumps:openblas:"
 ```
 
-Les deux partagent **le même** runtime OpenMP. Deux runtimes OpenMP dans un processus est une
-cause classique de blocage, et la chaîne clang passe par flang et LLVM.
+**Donc MUMPS sous flang fonctionne.** L'hypothèse qui aurait limité la proposition amont aux
+environnements gcc est écartée.
 
-**Discriminant préparé, non joué** : la variante `dso` ne lie **aucun** OpenMP
-(`libgfortran-5` seul). Relancer la chaîne sur clang avec `PETSC_VARIANT=dso` tranche :
+### 5.1 L'hypothèse des deux runtimes OpenMP est fausse
 
-```bash
-gh workflow run end-to-end-mumps.yml -f variant=dso
-```
+Elle était séduisante — PETSc bâti par clang, MUMPS `to` lié par flang, donc deux runtimes dans le
+processus, cause classique de blocage. **Les tables d'import disent le contraire.** Relevées à
+l'`objdump` sur les DLL elles-mêmes, celles du run `dto`, dépendances système retirées :
 
-- ça résout en 3 s → le coupable est OpenMP, probablement contournable ;
-- ça bloque encore → c'est MUMPS sous flang, et la proposition amont devrait se limiter aux
-  environnements gcc.
+| DLL | clang64 (bloque) | mingw64 (marche) |
+| --- | --- | --- |
+| `libpetsc-dto` | **libomp**, libmumps-dto, libopenblas, libhwloc-15 | **libgomp-1**, libmumps-dto, libopenblas, libhwloc-15, libgfortran-5, libgcc_s_seh-1, libwinpthread-1 |
+| `libmumps-dto` | **libomp**, libopenblas, libesmumps, libmetis, libscotch | **libgomp-1**, libopenblas, libesmumps, libmetis, libscotch, libgfortran-5 |
+| `libopenblas` | **libomp** | **libgomp-1** |
+
+**Un seul runtime OpenMP de chaque côté**, partagé par les trois consommateurs. La structure est
+identique ; seule l'implémentation change — `libomp` de LLVM contre `libgomp` de GNU. Il n'y a donc
+rien à déduplider, et la piste notée en fin de session précédente est close.
+
+Deux observations au passage, l'une écartée par la mesure :
+
+- Sur clang, **aucune** des deux DLL n'importe de runtime Fortran : `flang_rt.runtime` est statique,
+  donc le processus en porte bien deux copies indépendantes là où gcc partage `libgfortran-5.dll`.
+  Tentant — mais `dso` a exactement la même duplication et ne bloque pas. **Écarté.**
+- OpenBLAS est parallélisé par OpenMP dans les deux environnements, donc MUMPS appelle du BLAS
+  parallèle depuis ses propres régions. Le parallélisme imbriqué est symétrique entre gcc et clang
+  et n'explique pas à lui seul l'écart, mais c'est le contexte dans lequel `libomp` bloque.
+
+**Ce qui reste ouvert** : pourquoi `libomp` bloque là où `libgomp` passe. La question n'est plus
+« combien de runtimes » mais « lequel ». Non tranché, et vraisemblablement hors de notre portée —
+c'est à porter à qui connaît l'empaquetage flang/libomp.
 
 **Sans effet sur le paquet sparselizard** : le PETSc officiel n'ayant pas MUMPS, le repli joue et
-rien ne bloque. Mais **cela conditionne la proposition amont** — proposer MUMPS pour les quatre
-environnements livrerait un blocage sur deux d'entre eux.
+rien ne bloque. Mais le blocage reste entier en `dto`, qui est la variante retenue au §2.
+
+[r-dto]: https://github.com/hbadi/sparselizard-msys2/actions/runs/31124882570
+[r-dso]: https://github.com/hbadi/sparselizard-msys2/actions/runs/31128088908
 
 ---
 
@@ -254,9 +297,17 @@ environnements livrerait un blocage sur deux d'entre eux.
 - **Preuve à l'appui** : construit sur les quatre environnements, et une application réelle résout
   effectivement à travers MUMPS sur les deux chaînes gcc.
 
-**Réserve honnête à porter** : seules les variantes **réelles double** ont été mesurées. Les huit
-autres utilisent le même mécanisme et les mêmes `mumps-<v>` correspondants, mais n'ont pas été
-testées.
+**Réserves honnêtes à porter :**
+
+- Seules les variantes **réelles double** ont été mesurées. Les huit autres utilisent le même
+  mécanisme et les mêmes `mumps-<v>` correspondants, mais n'ont pas été testées.
+- **La variante OpenMP bloque sur les environnements clang** (§5). La proposition couvre bien les
+  quatre environnements, puisque `dso` y résout partout — mais taire le blocage `dto` serait
+  malhonnête, et un mainteneur le découvrirait de toute façon.
+- Le changement rend `petsc` dépendant de `mumps` **inconditionnellement**, ce qui alourdit un
+  paquet que beaucoup prennent pour les seuls solveurs itératifs. C'est la première objection
+  attendue ; l'alternative est un paquet séparé, que nous avons déjà, mais un second build à douze
+  variantes à maintenir paraît pire qu'un drapeau.
 
 ---
 
