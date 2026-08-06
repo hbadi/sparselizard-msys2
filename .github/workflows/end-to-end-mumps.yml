@@ -11,6 +11,16 @@ name: end to end - sparselizard on petsc with mumps
 # Manual: PETSc is long to build, and this has no bearing on the package itself.
 on:
   workflow_dispatch:
+    inputs:
+      variant:
+        description: >-
+          PETSc variant. dto is real double with OpenMP, dso the same without it.
+          The clang environments hang in the solve with dto while the gcc ones
+          finish in three seconds; dso links no OpenMP runtime at all, so running
+          it tells an OpenMP cause apart from a MUMPS-under-flang one.
+        type: choice
+        default: dto
+        options: [dto, dso]
 
 jobs:
   chain:
@@ -44,6 +54,21 @@ jobs:
             ninja:p
             pkgconf:p
 
+      - name: 0. Point both recipes at the chosen variant
+        shell: msys2 {0}
+        env:
+          V: ${{ inputs.variant }}
+        run: |
+          # Rewritten here rather than made an option of the recipes: both are
+          # headed upstream, where a variant knob added for one experiment would
+          # be noise. dto is what they say, so nothing happens on the default.
+          [ "$V" = dto ] && { echo "default variant, nothing to change"; exit 0; }
+          sed -i "s/^builds='dso dto'/builds='$V'/" experiments/mingw-w64-petsc-mumps/PKGBUILD
+          sed -i "s/|| builds+=' dmo'//" experiments/mingw-w64-petsc-mumps/PKGBUILD
+          sed -i "s/-DPETSC_VARIANT=dto/-DPETSC_VARIANT=$V/" mingw-w64-sparselizard/PKGBUILD
+          echo "--- petsc builds ---";        grep -E "^builds=|dmo" experiments/mingw-w64-petsc-mumps/PKGBUILD | head -3
+          echo "--- sparselizard variant ---"; grep -E "PETSC_VARIANT" mingw-w64-sparselizard/PKGBUILD
+
       - name: 1. Build petsc with mumps
         shell: msys2 {0}
         env:
@@ -54,6 +79,8 @@ jobs:
 
       - name: 2. Install it over the official petsc
         shell: msys2 {0}
+        env:
+          V: ${{ inputs.variant }}
         run: |
           cd experiments/mingw-w64-petsc-mumps
           # conflicts= makes pacman remove the official one first, if the
@@ -62,7 +89,7 @@ jobs:
           echo "--- what provides petsc now ---"
           pacman -Qi ${MINGW_PACKAGE_PREFIX}-petsc-mumps | grep -E "^(Name|Version|Provides|Conflicts)"
           echo "--- and it carries mumps ---"
-          grep -o 'PETSC_HAVE_PACKAGES.*' ${MINGW_PREFIX}/include/petsc/dto/petscconf.h
+          grep -o 'PETSC_HAVE_PACKAGES.*' ${MINGW_PREFIX}/include/petsc/${V}/petscconf.h
 
       - name: 3. Build sparselizard against it
         shell: msys2 {0}
