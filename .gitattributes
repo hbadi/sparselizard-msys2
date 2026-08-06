@@ -1,0 +1,9 @@
+# makepkg refuses to source a PKGBUILD containing CRLF, and GitHub's Windows
+# runners check out with core.autocrlf=true by default, so a repository that is
+# pure LF in git still lands as CRLF there. Pin the line endings on checkout so
+# the working tree is usable wherever it is cloned.
+#
+#   ==> ERROR: PKGBUILD contains CRLF characters and cannot be sourced.
+#
+* text=auto eol=lf
+*.pkg.tar.zst binary
