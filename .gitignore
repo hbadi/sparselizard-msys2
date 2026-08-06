@@ -1,0 +1,5 @@
+build-local/
+build/
+*.pkg.tar.zst
+src/
+pkg/

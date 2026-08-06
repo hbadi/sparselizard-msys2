@@ -34,8 +34,13 @@
 # Basic usage: tclsh $MINGW_PREFIX/share/test/petsc/petsc.tcl
 
 _realname=petsc
-pkgbase=mingw-w64-${_realname}
-pkgname=("${MINGW_PACKAGE_PREFIX}-${_realname}" "${MINGW_PACKAGE_PREFIX}-${_realname}-build")
+# A drop-in alternative to the official package rather than a second one beside
+# it: same library names, same variant layout, same .pc files, with MUMPS on top.
+# pacman expresses that with provides and conflicts, so anything depending on
+# petsc is satisfied by this, and the two can never be installed together.
+_sfx=-mumps
+pkgbase=mingw-w64-${_realname}${_sfx}
+pkgname=("${MINGW_PACKAGE_PREFIX}-${_realname}${_sfx}" "${MINGW_PACKAGE_PREFIX}-${_realname}${_sfx}-build")
 pkgver=3.25.1
 pkgrel=1
 pkgdesc='Sparse iterative (non)linear solver package (mingw-w64)'
@@ -47,6 +52,8 @@ msys2_references=(
   'aur: petsc'
 )
 license=('spdx:BSD-2-Clause')
+provides=("${MINGW_PACKAGE_PREFIX}-${_realname}=${pkgver}")
+conflicts=("${MINGW_PACKAGE_PREFIX}-${_realname}")
 depends=("${MINGW_PACKAGE_PREFIX}-cc-libs"
          "${MINGW_PACKAGE_PREFIX}-fc-libs"
          "${MINGW_PACKAGE_PREFIX}-hwloc"
@@ -228,8 +235,12 @@ build() {
   done
 }
 
-eval "package_${MINGW_PACKAGE_PREFIX}-${_realname}() { _package; }"
-eval "package_${MINGW_PACKAGE_PREFIX}-${_realname}-build() { _package_build; }"
+eval "package_${MINGW_PACKAGE_PREFIX}-${_realname}${_sfx}() { _package; }"
+eval "package_${MINGW_PACKAGE_PREFIX}-${_realname}${_sfx}-build() {
+  provides=(\"${MINGW_PACKAGE_PREFIX}-${_realname}-build=${pkgver}\")
+  conflicts=(\"${MINGW_PACKAGE_PREFIX}-${_realname}-build\")
+  _package_build
+}"
 
 _package() {
   builddir="${srcdir}"/build-${MSYSTEM}/${_realname}-${pkgver}

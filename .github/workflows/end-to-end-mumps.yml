@@ -1,0 +1,91 @@
+name: end to end - sparselizard on petsc with mumps
+
+# The whole chain, on the four environments: build a PETSc carrying MUMPS,
+# install it over the official one, build sparselizard against it, then have an
+# application prove that MUMPS is what actually ran.
+#
+# That last step is the point. The fallback is silent by design, so the
+# capacitance comes out the same whichever solver was used; only
+# universe::getsolvertype() distinguishes them.
+#
+# Manual: PETSc is long to build, and this has no bearing on the package itself.
+on:
+  workflow_dispatch:
+
+jobs:
+  chain:
+    name: ${{ matrix.msystem }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { msystem: MINGW64,    prefix: mingw64,    runner: windows-2022 }
+          - { msystem: UCRT64,     prefix: ucrt64,     runner: windows-2022 }
+          - { msystem: CLANG64,    prefix: clang64,    runner: windows-2022 }
+          - { msystem: CLANGARM64, prefix: clangarm64, runner: windows-11-arm }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            base-devel
+            git
+            python
+          pacboy: >-
+            cc:p
+            fc:p
+            cmake:p
+            ninja:p
+            pkgconf:p
+
+      - name: 1. Build petsc with mumps
+        shell: msys2 {0}
+        env:
+          MINGW_ARCH: ${{ matrix.prefix }}
+        run: |
+          cd experiments/mingw-w64-petsc-mumps
+          makepkg-mingw --syncdeps --cleanbuild --force --noconfirm --nocheck
+
+      - name: 2. Install it over the official petsc
+        shell: msys2 {0}
+        run: |
+          cd experiments/mingw-w64-petsc-mumps
+          # conflicts= makes pacman remove the official one first, if the
+          # dependency resolution above happened to pull it in.
+          pacman -U --noconfirm --needed ${MINGW_PACKAGE_PREFIX}-petsc-mumps-*.pkg.tar.zst
+          echo "--- what provides petsc now ---"
+          pacman -Qi ${MINGW_PACKAGE_PREFIX}-petsc-mumps | grep -E "^(Name|Version|Provides|Conflicts)"
+          echo "--- and it carries mumps ---"
+          grep -o 'PETSC_HAVE_PACKAGES.*' ${MINGW_PREFIX}/include/petsc/dto/petscconf.h
+
+      - name: 3. Build sparselizard against it
+        shell: msys2 {0}
+        env:
+          MINGW_ARCH: ${{ matrix.prefix }}
+        run: |
+          cd mingw-w64-sparselizard
+          makepkg-mingw --syncdeps --cleanbuild --force --noconfirm
+          pacman -U --noconfirm --needed *.pkg.tar.zst
+
+      - name: 4. Prove MUMPS is what runs
+        shell: msys2 {0}
+        run: |
+          cd tests/mumps-check
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          cd build && ./mumps-check.exe
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: end-to-end-${{ matrix.msystem }}
+          path: |
+            experiments/mingw-w64-petsc-mumps/*.pkg.tar.zst
+            mingw-w64-sparselizard/*.pkg.tar.zst
+          if-no-files-found: ignore
