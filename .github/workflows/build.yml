@@ -25,7 +25,7 @@ jobs:
           - { msystem: CLANGARM64, prefix: clangarm64, runner: windows-11-arm }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -69,7 +69,7 @@ jobs:
           echo "--- the CMake package has to be usable, that is the point ---"
           test -f "${MINGW_PREFIX}/lib/cmake/sparselizard/sparselizardConfig.cmake"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ${{ matrix.msystem }}
