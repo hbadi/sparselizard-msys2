@@ -1,0 +1,76 @@
+name: experiment - petsc with mumps
+
+# Does the packaged MUMPS pair with the packaged PETSc, on all four
+# environments? The answer decides whether it is worth proposing upstream, and
+# arriving there with four green builds is worth more than an argument.
+#
+# Manual only: PETSc is long to build even restricted to the real double
+# variants, and this has no bearing on the sparselizard package.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.msystem }}
+    runs-on: ${{ matrix.runner }}
+    # PETSc configure plus three variants; well under this, but a hung configure
+    # should not burn an hour.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { msystem: MINGW64,    prefix: mingw64,    runner: windows-2022 }
+          - { msystem: UCRT64,     prefix: ucrt64,     runner: windows-2022 }
+          - { msystem: CLANG64,    prefix: clang64,    runner: windows-2022 }
+          - { msystem: CLANGARM64, prefix: clangarm64, runner: windows-11-arm }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            base-devel
+            git
+            python
+          pacboy: >-
+            cc:p
+            fc:p
+            pkgconf:p
+            openblas:p
+            hwloc:p
+            metis:p
+            parmetis:p
+            mumps:p
+            scotch:p
+
+      - name: Build petsc with mumps
+        shell: msys2 {0}
+        env:
+          MINGW_ARCH: ${{ matrix.prefix }}
+        run: |
+          cd experiments/mingw-w64-petsc-mumps
+          makepkg-mingw --syncdeps --cleanbuild --force --noconfirm --nocheck
+
+      - name: Did MUMPS actually get in?
+        shell: msys2 {0}
+        run: |
+          cd experiments/mingw-w64-petsc-mumps
+          for v in dso dto; do
+            f=$(find pkg -path "*petsc/$v/petscconf.h" | head -1)
+            [ -n "$f" ] || { echo "$v: no petscconf.h"; continue; }
+            echo "$v: $(grep -o 'PETSC_HAVE_PACKAGES.*' "$f")"
+            grep -q "PETSC_HAVE_MUMPS" "$f" && echo "  -> MUMPS present" || echo "  -> MUMPS ABSENT"
+          done
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: petsc-mumps-${{ matrix.msystem }}
+          path: |
+            experiments/mingw-w64-petsc-mumps/*.pkg.tar.zst
+            experiments/mingw-w64-petsc-mumps/src/petsc-*/configure.log
+          if-no-files-found: ignore
