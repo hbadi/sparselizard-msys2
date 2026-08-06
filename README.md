@@ -53,5 +53,6 @@ pacman -U *.pkg.tar.zst
 
 ## Notes
 
-Le détail des relevés — les douze variantes de PETSc et leur nommage, l'emplacement du stub MPIUNI,
-le conflit entre `msmpi` et `<mpi.h>` — est consigné dans le dépôt de notes privé, hors de celui-ci.
+**[`NOTES.md`](NOTES.md)** — le journal de travail : l'état exact, les pièges rencontrés et leurs
+correctifs, les astuces, le blocage clang non résolu et l'argumentaire préparé pour l'amont.
+À lire avant de reprendre.
