@@ -6,6 +6,13 @@ name: build
 # chance of being green there.
 on:
   push:
+    # The experiment under experiments/ has its own workflow and nothing to do
+    # with this package. Without this, every push touching it re-ran the four
+    # flavours here for nothing, and the run list became unreadable.
+    paths-ignore:
+      - 'experiments/**'
+      - '.github/workflows/petsc-mumps.yml'
+      - 'README.md'
   pull_request:
   workflow_dispatch:
 
