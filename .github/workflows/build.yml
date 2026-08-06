@@ -13,6 +13,7 @@ on:
       - 'experiments/**'
       - '.github/workflows/petsc-mumps.yml'
       - 'README.md'
+      - 'NOTES.md'
   pull_request:
   workflow_dispatch:
 
@@ -20,6 +21,9 @@ jobs:
   build:
     name: ${{ matrix.msystem }}
     runs-on: ${{ matrix.runner }}
+    # The package alone takes about half an hour. The rest is the examples,
+    # whose total is not yet known -- this is the first run of them.
+    timeout-minutes: 200
     strategy:
       # Every environment is reported, rather than stopping at the first
       # failure: knowing that three of four are fine is the useful outcome.
@@ -76,9 +80,53 @@ jobs:
           echo "--- the CMake package has to be usable, that is the point ---"
           test -f "${MINGW_PREFIX}/lib/cmake/sparselizard/sparselizardConfig.cmake"
 
+      # The package itself is built with the examples off: 57 executables have no
+      # place in it. But they are the only broad exercise of the library that
+      # exists, so they are built and run here, in the tree makepkg just left
+      # behind. Reconfiguring that tree rather than a fresh one means the library
+      # is not compiled a second time -- only the examples are.
+      - name: Build the examples
+        shell: msys2 {0}
+        run: |
+          cd mingw-w64-sparselizard/src
+          "${MINGW_PREFIX}/bin/cmake.exe" -DSPARSELIZARD_BUILD_EXAMPLES=ON "build-${MSYSTEM}"
+          _jobs=$(nproc)
+          "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}" -j "${_jobs}"
+
+      # Serial on purpose. The dependencies are the parallel ones here -- petsc
+      # dto and openblas are both OpenMP -- so running examples concurrently
+      # would oversubscribe the four cores rather than go faster.
+      #
+      # Each example carries a 600 s timeout from the CMake side, and the ones
+      # needing an option that is off (gmsh) were never registered, so a failure
+      # here is a real one rather than a disabled feature.
+      # Bounded by `timeout` rather than by the job deadline: a job killed by
+      # GitHub takes the ctest summary with it, whereas this exits normally and
+      # still uploads the log. 57 examples at up to 600 s each could otherwise
+      # run for nine hours.
+      - name: Run every example
+        shell: msys2 {0}
+        run: |
+          cd mingw-w64-sparselizard/src/build-${MSYSTEM}
+          # The shell runs with -e, so the status has to be caught rather than
+          # read from $? on the next line, which would never be reached.
+          rc=0
+          timeout --signal=INT 150m ctest --output-on-failure --no-tests=error || rc=$?
+          [ "$rc" -eq 124 ] && echo "::warning::stopped at 150 min, not every example ran"
+          exit "$rc"
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ${{ matrix.msystem }}
           path: mingw-w64-sparselizard/*.pkg.tar.zst
+          if-no-files-found: ignore
+
+      # The ctest log carries the per-example output and timings, which is what
+      # tells a slow example from a broken one when the job is red.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ctest-${{ matrix.msystem }}
+          path: mingw-w64-sparselizard/src/build-*/Testing/**
           if-no-files-found: ignore
