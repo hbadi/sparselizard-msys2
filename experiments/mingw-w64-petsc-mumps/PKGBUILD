@@ -129,7 +129,7 @@ builds='dso dto'
 # the include path would have PETSc compile against the wrong one. The two do not
 # otherwise collide, PETSc renaming every MPIUNI symbol to Petsc_MPI_*.
 _mumps_opts() {
-  printf -- '--with-mumps=1 --with-mumps-include=%s/include --with-mumps-lib=[-lmumps-%s,-lesmumps]'     "${MINGW_PREFIX}" "$1"
+  printf -- '--with-mumps=1 --with-mumps-include=%s/include --with-mumps-lib=[-lmumps-%s,-lesmumps]' "${MINGW_PREFIX}" "$1"
 }
 
 _petsc() {
