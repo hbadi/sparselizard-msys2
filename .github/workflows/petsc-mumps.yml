@@ -36,16 +36,14 @@ jobs:
             base-devel
             git
             python
+          # Deliberately minimal: makepkg --syncdeps resolves the rest from the
+          # PKGBUILD, which is where the per-architecture logic lives. Listing
+          # parmetis here failed on clangarm64, where it does not exist, and
+          # the PKGBUILD already knows that.
           pacboy: >-
             cc:p
             fc:p
             pkgconf:p
-            openblas:p
-            hwloc:p
-            metis:p
-            parmetis:p
-            mumps:p
-            scotch:p
 
       - name: Build petsc with mumps
         shell: msys2 {0}
