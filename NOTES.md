@@ -13,7 +13,7 @@ pas supposé. Ce qui reste une hypothèse est signalé comme tel.
 **Acquis, mesuré :**
 
 - `mingw-w64-sparselizard` construit sur **les quatre saveurs** — mingw64, ucrt64, clang64,
-  clangarm64 — à partir de l'amont plus huit patchs.
+  clangarm64 — à partir de l'amont plus neuf patchs.
 - `petsc-mumps` construit sur les quatre, dans les **trois** modèles de parallélisme
   (`dso` séquentiel, `dto` OpenMP, `dmo` MPI avec ScaLAPACK).
 - La **chaîne complète** est prouvée sur les deux environnements gcc : une application consommant
@@ -449,7 +449,7 @@ d'un lecteur 4.1 se manifeste pour autre chose que les exemples.
 
 ## 8. Correctifs sparselizard portés en patchs
 
-Huit, dans `mingw-w64-sparselizard`, appliqués sur le commit amont `0b826d88` :
+Neuf, dans `mingw-w64-sparselizard`, appliqués sur le commit amont `0b826d88` :
 
 | patch | objet |
 | --- | --- |
@@ -461,9 +461,10 @@ Huit, dans `mingw-w64-sparselizard`, appliqués sur le commit amont `0b826d88` :
 | 0006 | artefacts Visual Studio émis pour MSVC et non pour Windows au sens large |
 | 0007 | retrait du `using namespace std` du seul exemple qui en avait un |
 | 0008 | un exemple qui ne peut pas tourner n'est plus enregistré |
+| 0009 | `logs::error` déclarée `[[noreturn]]` |
 
-Les 0002, 0004, 0005, 0006, 0007 et 0008 sont des correctifs amont à part entière, indépendants de
-MSYS2.
+Les 0002, 0004, 0005, 0006, 0007, 0008 et 0009 sont des correctifs amont à part entière,
+indépendants de MSYS2.
 
 Le 0007 demande une attention que son intitulé ne laisse pas deviner. La directive était presque
 inutilisée — `std::string`, `std::vector`, `std::pow`, `std::cout` sont déjà qualifiés partout. Ce
@@ -475,3 +476,23 @@ et continuent de résoudre vers `sl::`. L'inverse aurait compilé en changeant l
 Vérifié plutôt que supposé, avec le gcc 16.1 local en `__cplusplus 202002L` : l'unité de traduction
 compile, et le contrôle négatif — le fichier d'origine, même configuration — rend bien ses
 18 erreurs `reference to 'integral' is ambiguous`.
+
+### 8.1 Les avertissements de compilation, relevés
+
+La bibliothèque en produit deux familles, antérieures à cette session.
+
+**`-Wreturn-type`, une occurrence, sur gcc *et* clang** — `sl::allpartition` sans l'API gmsh
+(`sl.cpp:267`) : tout son corps est un message puis `log.error()`. Or `logs::error()` fait un
+`throw` **inconditionnel**, donc la fonction ne retombe jamais — mais rien ne le disait. Traité par
+le patch 0009, `[[noreturn]]` sur la déclaration. Préféré à un `return` factice, qui aurait ajouté
+du code mort et n'aurait rien documenté. Contrôle négatif fait : d'origine 1 avertissement, avec
+l'attribut 0.
+
+**`-Wbraced-scalar-init`, quatorze occurrences, clang seulement** — fonctions de forme et
+`port.cpp`, par exemple `ki.set({{{}},{{{1.0}}}});` dans `lagrangepyramid.cpp:30`. Des accolades en
+trop autour d'un scalaire, sans effet sur le code produit. **Non traité**, sciemment : quatorze
+fichiers touchés pour du cosmétique, dans une série destinée à l'amont.
+
+Deux fausses pistes à ne pas reprendre : `warning: terminate other MSYS2 programs before
+proceeding` vient de pacman et non du build ; et le `::warning::stopped at 150 min` qu'on lit dans
+le journal est l'**écho de la ligne du script**, pas un avertissement émis.

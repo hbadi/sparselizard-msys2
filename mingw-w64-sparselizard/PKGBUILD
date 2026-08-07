@@ -35,8 +35,10 @@ source=("${_realname}::git+https://github.com/halbux/sparselizard.git#commit=${_
         '0005-Find-a-PETSc-that-ships-one-library-per-variant.patch'
         '0006-Emit-the-Visual-Studio-artefacts-for-MSVC-not-for-Wi.patch'
         '0007-Drop-the-global-using-namespace-std-from-an-example.patch'
-        '0008-Do-not-register-an-example-that-cannot-possibly-run.patch')
+        '0008-Do-not-register-an-example-that-cannot-possibly-run.patch'
+        '0009-Declare-logs-error-as-noreturn.patch')
 sha256sums=('SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -73,6 +75,8 @@ sha256sums=('SKIP'
 #        the gmsh reader with the API off, or a mesh absent from the tree. Five
 #        of the fifty-seven failed on every run for reasons already known, which
 #        costs the suite its meaning.
+#  0009  declares logs::error noreturn. It throws unconditionally, which nothing
+#        said, so sl::allpartition drew a -Wreturn-type from gcc and clang both.
 
 prepare() {
   cd "${srcdir}/${_realname}"

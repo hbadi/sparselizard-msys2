@@ -1,0 +1,40 @@
+From c92246005dbbb51e41223ffba982309a46f2964e Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Fri, 7 Aug 2026 10:26:48 +0200
+Subject: [PATCH] Declare logs::error as noreturn
+
+It throws unconditionally, so it never comes back, but nothing said so and the
+compiler could not know. The one place it shows is sl::allpartition without the
+Gmsh API, whose whole body is a message and that call: gcc reports "control
+reaches end of non-void function", clang "non-void function does not return a
+value in all control paths". Both are right about what they can see.
+
+The attribute is the honest fix rather than a return value invented to quiet the
+warning, which would have added dead code and said nothing. It also documents
+the contract at every other call site, and lets the compiler drop the code that
+would follow.
+
+Declared in the header, so every translation unit agrees; logs.cpp includes it,
+and the definition already never returns.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/logs.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/logs.h b/src/logs.h
+index 707f15c4..efe84eac 100755
+--- a/src/logs.h
++++ b/src/logs.h
+@@ -22,7 +22,7 @@ class logs
+ 
+         std::ostream& msg(void);
+         
+-        void error(void);
++        [[noreturn]] void error(void);
+     
+ };
+ 
+-- 
+2.53.0.windows.2
+
