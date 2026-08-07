@@ -382,14 +382,49 @@ L'échec de compilation sur gcc est traité par le patch 0007.
 - **Borner par `timeout(1)`, pas par l'échéance du job.** Un job tué par GitHub emporte le résumé
   CTest avec lui.
 
-**Décision : gmsh est activé dans le paquet.** Elle renverse le §1.3 du plan. Le coût est mesuré —
-gmsh 40 Mo installés, et surtout OpenCASCADE 262 Mo derrière, soit environ 300 Mo de fermeture.
-Jugé négligeable au regard de ce que pèse un `.vtu` de résultats. Le gain est direct : **57 cibles
-enregistrées au lieu de 54**, vérifié à la configuration, et les trois exemples en maillage 4.1
-deviennent exécutables. `mingw-w64-gmsh` déclare exactement le même `mingw_arch` que notre paquet,
-et livre `gmsh.h` et `libgmsh.dll.a`. Le gabarit du config amont gère déjà la dépendance publique
-(`find_dependency(GMSH)` sous garde, `FindGMSH.cmake` installé à côté), donc le paquet exporté
-reste consommable.
+### 7.1 gmsh : essayé, mesuré, reposé
+
+**Décision : gmsh reste désactivé.** Elle a été renversée puis rétablie dans la même journée, et le
+détour valait la mesure qu'il a produite.
+
+Ce qu'on gagnerait, vérifié à la configuration : **57 cibles enregistrées au lieu de 54**, et les
+trois exemples en maillage 4.1 deviennent exécutables. `mingw-w64-gmsh` déclare exactement le même
+`mingw_arch` que notre paquet, livre `gmsh.h` et `libgmsh.dll.a`, et le gabarit du config amont
+gère déjà la dépendance publique (`find_dependency(GMSH)` sous garde, `FindGMSH.cmake` installé à
+côté) — le paquet exporté resterait consommable. Rien ne s'y oppose techniquement.
+
+Ce que ça coûte, et c'est ce qui a tranché :
+
+```
+146 paquets     327 Mo à télécharger     2,47 Go installés
+```
+
+Les plus gros : **vtk 675 Mo**, opencascade 262, python 213, librsvg 186, imath 116, ffmpeg 81.
+L'essentiel n'arrive pas par gmsh — 40 Mo — mais par OpenCASCADE, qui dépend de **vtk**, ffmpeg,
+tcl, tk et openvr. Et il n'existe **aucun paquet gmsh allégé ou sans interface** : une seule
+version par environnement. `optdepends` n'est pas une échappatoire non plus — `HAVE_GMSH` est
+compilé dans la bibliothèque et `libgmsh.dll` est requise au chargement, donc la dépendance est
+dure dès l'option activée.
+
+> **Le premier chiffre annoncé, « environ 300 Mo », était faux.** Obtenu en additionnant les
+> tailles propres de gmsh et d'OpenCASCADE sans parcourir la fermeture. La décision d'activer a
+> donc été prise sur un nombre huit fois trop petit, et rétablie une fois le bon connu. Additionner
+> deux paquets au lieu de parcourir le graphe est exactement le raccourci que ce journal existe
+> pour éviter.
+
+Et le coût s'est payé le jour même : le run avec gmsh a échoué sur les deux chaînes gcc, non sur du
+code mais sur le miroir —
+
+```
+error: failed retrieving file 'mingw-w64-x86_64-opencascade-...' : Operation too slow
+```
+
+327 Mo à tirer sur chaque job de chaque environnement rend la CI sensible à un miroir lent. Les
+chaînes clang, elles, sont passées : c'est un aléa, pas un déterminisme.
+
+**Conséquence assumée** : six exemples sur 57 restent inexercés — trois écartés à la configuration
+pour `gmsh.h`, trois qui échouent à l'exécution sur leur maillage 4.1. À reprendre si le besoin
+d'un lecteur 4.1 se manifeste pour autre chose que les exemples.
 
 ---
 

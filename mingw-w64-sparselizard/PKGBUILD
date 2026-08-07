@@ -18,7 +18,6 @@ mingw_arch=('mingw64' 'ucrt64' 'clang64' 'clangarm64')
 url='http://www.sparselizard.org'
 license=('spdx:GPL-2.0-or-later')
 depends=("${MINGW_PACKAGE_PREFIX}-cc-libs"
-         "${MINGW_PACKAGE_PREFIX}-gmsh"
          "${MINGW_PACKAGE_PREFIX}-openblas"
          "${MINGW_PACKAGE_PREFIX}-petsc"
          "${MINGW_PACKAGE_PREFIX}-slepc")
@@ -85,12 +84,18 @@ build() {
   # OpenMP is off for sparselizard itself: it does not need it. Its dependencies
   # are where the parallelism lives, and petsc-dto is already built with it.
   #
-  # Gmsh is on. It is not decoration: the native mesh reader only handles the 2.2
-  # format, and an example or an application carrying a 4.1 mesh -- what recent
-  # Gmsh writes by default -- fails at run time without the API. mingw-w64-gmsh
-  # declares the same four environments as this package and ships both gmsh.h and
-  # the import library. The cost is the dependency closure, some 300 MB of which
-  # OpenCASCADE is the bulk.
+  # Gmsh is off, and the trade is worth stating because it is not free either
+  # way. With it, the library reads meshes in the 4.1 format, which is what
+  # recent Gmsh writes by default; without it, the native reader handles 2.2
+  # only and a 4.1 mesh fails at run time. Six of the fifty-seven examples need
+  # it, three at compile time and three at run time.
+  #
+  # Against that: the dependency closure is 146 packages, 327 MB to download and
+  # 2.5 GB installed. Gmsh itself is 40 MB of it; the rest arrives through
+  # OpenCASCADE, which pulls VTK at 675 MB, plus ffmpeg, tcl, tk and openvr.
+  # There is no headless or API-only Gmsh package to take instead. Handing that
+  # to everyone who installs this package, for a mesh format many users will
+  # convert once, is the reason it stays off.
   MSYS2_ARG_CONV_EXCL=-DCMAKE_INSTALL_PREFIX= \
     "${MINGW_PREFIX}/bin/cmake.exe" \
       -GNinja \
@@ -99,7 +104,7 @@ build() {
       -DPETSC_VARIANT=dto \
       -DSPARSELIZARD_ENABLE_OPENMP=OFF \
       -DSPARSELIZARD_ENABLE_MPI=OFF \
-      -DSPARSELIZARD_ENABLE_GMSH=ON \
+      -DSPARSELIZARD_ENABLE_GMSH=OFF \
       -DSPARSELIZARD_BUILD_SIMULATIONS=OFF \
       -DSPARSELIZARD_BUILD_EXAMPLES=OFF \
       -S "${srcdir}/${_realname}" \
