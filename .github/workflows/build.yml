@@ -21,8 +21,9 @@ jobs:
   build:
     name: ${{ matrix.msystem }}
     runs-on: ${{ matrix.runner }}
-    # The package alone takes about half an hour. The rest is the examples,
-    # whose total is not yet known -- this is the first run of them.
+    # The package alone takes two to four minutes depending on the environment.
+    # Everything beyond that is the examples, whose total is not yet known --
+    # this is the first run of them.
     timeout-minutes: 200
     strategy:
       # Every environment is reported, rather than stopping at the first
@@ -86,12 +87,15 @@ jobs:
       # behind. Reconfiguring that tree rather than a fresh one means the library
       # is not compiled a second time -- only the examples are.
       - name: Build the examples
+        id: examples
         shell: msys2 {0}
         run: |
           cd mingw-w64-sparselizard/src
           "${MINGW_PREFIX}/bin/cmake.exe" -DSPARSELIZARD_BUILD_EXAMPLES=ON "build-${MSYSTEM}"
-          _jobs=$(nproc)
-          "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}" -j "${_jobs}"
+          # -k 0 so that one example failing to compile does not hide the other
+          # fifty-six. Without it ninja stops at the first error and nothing runs,
+          # which is how the first attempt reported nothing at all on gcc.
+          "${MINGW_PREFIX}/bin/cmake.exe" --build "build-${MSYSTEM}" -j "$(nproc)" -- -k 0
 
       # Serial on purpose. The dependencies are the parallel ones here -- petsc
       # dto and openblas are both OpenMP -- so running examples concurrently
@@ -104,7 +108,10 @@ jobs:
       # GitHub takes the ctest summary with it, whereas this exits normally and
       # still uploads the log. 57 examples at up to 600 s each could otherwise
       # run for nine hours.
+      # Runs whether or not every example compiled: what did compile still has
+      # something to say, and the build step above already turned the job red.
       - name: Run every example
+        if: steps.examples.outcome == 'success' || steps.examples.outcome == 'failure'
         shell: msys2 {0}
         run: |
           cd mingw-w64-sparselizard/src/build-${MSYSTEM}

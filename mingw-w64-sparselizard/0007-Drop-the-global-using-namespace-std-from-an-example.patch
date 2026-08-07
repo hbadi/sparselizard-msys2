@@ -1,0 +1,83 @@
+From b3d535247ef16e8f00467735a979551d309a2659 Mon Sep 17 00:00:00 2001
+From: Hamid <badi.hamid@gmail.com>
+Date: Fri, 7 Aug 2026 09:57:13 +0200
+Subject: [PATCH] Drop the global using namespace std from an example
+
+thermoacoustic-elasticity-axisymmetry-2d is the only one of the fifty-seven
+examples that opens both namespaces, and under a compiler defaulting to C++20
+it stops compiling: sl::integral collides with the std::integral concept, and
+every call to integral() in it is ambiguous. gcc 16 defaults to C++20, so this
+is not hypothetical. It is the same collision that the public headers were
+cleaned of; this is the last place it survived.
+
+The directive was almost unused already -- std::string, std::to_string,
+std::vector, std::pow, std::cout and std::endl are qualified throughout. What
+was left are the bare pow and sqrt calls, and those need care rather than a
+blanket prefix: T0 is a double, while Cp, c and gamma are sparselizard
+expressions. So pow(T0,n) and sqrt on doubles become std::, while
+sqrt(Cp*(gamma-1)/T0) and pow(c,2) stay unqualified and keep resolving to sl::.
+Getting that backwards would compile and mean something else.
+
+Add <cmath> for the std:: maths now named explicitly.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .../main.cpp                                      | 15 +++++++--------
+ 1 file changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/examples/thermoacoustic-elasticity-axisymmetry-2d/main.cpp b/examples/thermoacoustic-elasticity-axisymmetry-2d/main.cpp
+index 92ba313d..4dd3e425 100644
+--- a/examples/thermoacoustic-elasticity-axisymmetry-2d/main.cpp
++++ b/examples/thermoacoustic-elasticity-axisymmetry-2d/main.cpp
+@@ -11,12 +11,11 @@
+ 
+ 
+ #include "sparselizard.h"
++#include <cmath>
+ #include <iostream>
+ #include <fstream>
+ #include <string>
+ 
+-using namespace std;
+-
+ using namespace sl;
+ 
+ // Arguments are:
+@@ -74,12 +73,12 @@ int main(void)
+     double p0=1.013e5,T0=293;
+ 
+     rho0=(p0)*0.02897/(R_const*(T0));//(p+p0)*0.02897/(R_const*(T+T0));//-(T)*0.00431073+1.20494464330308;
+-    lmb=-8.38278E-7+8.35717342E-8*(T0)-7.69429583E-11*pow(T0,2)+4.6437266E-14*pow(T0,3)-1.06585607E-17*pow(T0,4);//(T)*4.99221E-08+1.81322817E-05;
++    lmb=-8.38278E-7+8.35717342E-8*(T0)-7.69429583E-11*std::pow(T0,2)+4.6437266E-14*std::pow(T0,3)-1.06585607E-17*std::pow(T0,4);//(T)*4.99221E-08+1.81322817E-05;
+     muB=0.6*lmb;//(T)*2.99532E-08+1.08793690E-05;
+-    kappa=-0.00227583562+1.15480022E-4*(T0)-7.90252856E-8*pow(T0,2)+4.11702505E-11*pow(T0,3)-7.43864331E-15*pow(T0,4);//(T)*7.96428E-05+2.57563324E-02;
++    kappa=-0.00227583562+1.15480022E-4*(T0)-7.90252856E-8*std::pow(T0,2)+4.11702505E-11*std::pow(T0,3)-7.43864331E-15*std::pow(T0,4);//(T)*7.96428E-05+2.57563324E-02;
+     gamma=1.4;//-(T)*1.8214E-05+1.39948988;
+-    Cp=1047.63657-0.372589265*(T0)+9.45304214E-4*pow(T0,2)-6.02409443E-7*pow(T0,3)+1.2858961E-10*pow(T0,4);//(T)*0.032741694+1.00541619E+03;
+-    c=sqrt(1.4*R_const/0.02897*(T0));//(T)*0.589990819+343.051751;
++    Cp=1047.63657-0.372589265*(T0)+9.45304214E-4*std::pow(T0,2)-6.02409443E-7*std::pow(T0,3)+1.2858961E-10*std::pow(T0,4);//(T)*0.032741694+1.00541619E+03;
++    c=std::sqrt(1.4*R_const/0.02897*(T0));//(T)*0.589990819+343.051751;
+     alpha_p=sqrt(Cp*(gamma-1)/T0)/c;
+     beta=gamma/(rho0*pow(c,2));
+     rhot=rho0*(beta*(p+p0)-alpha_p*(T+T0));
+@@ -244,7 +243,7 @@ mesh createmesh(double rmb, double depth, double thick, double BLth)
+ 
+     std::vector<double>cavity_vpoints(3*(nzcavity+2*nBLth+1));
+ 
+-    double step1=sqrt(BLth)/nBLth, step2=(depth-2*BLth)/nzcavity;
++    double step1=std::sqrt(BLth)/nBLth, step2=(depth-2*BLth)/nzcavity;
+ 
+     // nodes are spaced accordignly to have a boundary layer mesh
+ 
+@@ -276,7 +275,7 @@ mesh createmesh(double rmb, double depth, double thick, double BLth)
+ 
+     std::vector<double>cavity_hpoints(3*(2+nxmb+nBLth+1));
+ 
+-    step1=sqrt(BLth)/nBLth;
++    step1=std::sqrt(BLth)/nBLth;
+     step2=(rmb-BLth-caxis)/(nxmb);
+ 
+     //special node for the axis ; should be smaller than one node
+-- 
+2.53.0.windows.2
+

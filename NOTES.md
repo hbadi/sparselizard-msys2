@@ -340,9 +340,62 @@ partitionneurs parallèles, et c'est PT-Scotch, paquet distinct de celui que MUM
 
 ---
 
-## 7. Correctifs sparselizard portés en patchs
+## 7. Les exemples, exercés en CI
 
-Six, dans `mingw-w64-sparselizard/`, appliqués sur le commit amont `0b826d88` :
+Le paquet se construit avec `SPARSELIZARD_BUILD_EXAMPLES=OFF` — 57 exécutables n'y ont pas leur
+place. Mais le workflow reconfigure ensuite l'arbre que `makepkg` laisse derrière lui, ce qui les
+construit **sans recompiler la bibliothèque**, puis lance `ctest`. C'est le seul exercice large de
+la bibliothèque qui existe ; avant cela il n'y avait que la vérification de capacitance du §5.
+
+Tout l'outillage venait du patch 0001 : chaque exemple est enregistré avec son répertoire de
+travail — indispensable, plusieurs partagent `disk.msh`, `quad.msh`, `u.vtu` — et un délai de 600 s.
+
+**Premier passage, sans gmsh** (54 enregistrés, 3 écartés pour `gmsh.h`) :
+
+```
+CLANG64      45/54   3295 s
+CLANGARM64   45/54   3210 s      exactement les mêmes 9 échecs
+MINGW64      ne compile pas
+UCRT64       ne compile pas
+```
+
+Les 9 échecs, en trois familles, et **aucun n'était un défaut de la bibliothèque** :
+
+- **trois réclamaient l'API gmsh à l'exécution** — leurs maillages sont au format **4.1**, que le
+  lecteur natif refuse, là où ceux qui passent sont en **2.2**. Discriminant vérifiable d'une
+  ligne : `sed -n '2p' *.msh`. Le garde du CMake ne lit que `gmsh.h` dans la source, il ne peut pas
+  voir le format du maillage ;
+- **deux n'ont pas de maillage du tout** — `channel.msh` et `waveguide3D.msh` sont absents du dépôt
+  amont, qui n'en livre que le `.geo`. Omission amont, à signaler ;
+- **quatre dépassent les 600 s** — `magnetodynamics-av-induction-3d`,
+  `nonlinear-natural-convection-hpfem-2d`, `superconductor-3d`,
+  `thermoacoustic-elasticity-axisymmetry-2d`. On sait qu'ils dépassent dix minutes, **pas de borne
+  supérieure**.
+
+L'échec de compilation sur gcc est traité par le patch 0007.
+
+**Deux pièges du montage, l'un et l'autre payés :**
+
+- **ninja s'arrête à la première erreur.** Un exemple qui ne compilait pas a empêché les 56 autres
+  de tourner : les deux chaînes gcc n'ont rien rapporté du tout. D'où `-k 0`, et le step `ctest`
+  conditionné sur l'*exécution* du précédent et non sur sa réussite.
+- **Borner par `timeout(1)`, pas par l'échéance du job.** Un job tué par GitHub emporte le résumé
+  CTest avec lui.
+
+**Décision : gmsh est activé dans le paquet.** Elle renverse le §1.3 du plan. Le coût est mesuré —
+gmsh 40 Mo installés, et surtout OpenCASCADE 262 Mo derrière, soit environ 300 Mo de fermeture.
+Jugé négligeable au regard de ce que pèse un `.vtu` de résultats. Le gain est direct : **57 cibles
+enregistrées au lieu de 54**, vérifié à la configuration, et les trois exemples en maillage 4.1
+deviennent exécutables. `mingw-w64-gmsh` déclare exactement le même `mingw_arch` que notre paquet,
+et livre `gmsh.h` et `libgmsh.dll.a`. Le gabarit du config amont gère déjà la dépendance publique
+(`find_dependency(GMSH)` sous garde, `FindGMSH.cmake` installé à côté), donc le paquet exporté
+reste consommable.
+
+---
+
+## 8. Correctifs sparselizard portés en patchs
+
+Sept, dans `mingw-w64-sparselizard/`, appliqués sur le commit amont `0b826d88` :
 
 | patch | objet |
 | --- | --- |
@@ -352,5 +405,17 @@ Six, dans `mingw-w64-sparselizard/`, appliqués sur le commit amont `0b826d88` :
 | 0004 | repli silencieux sur le LU de PETSc quand le solveur demandé n'existe pas |
 | 0005 | découverte d'un PETSc livrant une bibliothèque par variante |
 | 0006 | artefacts Visual Studio émis pour MSVC et non pour Windows au sens large |
+| 0007 | retrait du `using namespace std` du seul exemple qui en avait un |
 
-Les 0002, 0004, 0005 et 0006 sont des correctifs amont à part entière, indépendants de MSYS2.
+Les 0002, 0004, 0005, 0006 et 0007 sont des correctifs amont à part entière, indépendants de MSYS2.
+
+Le 0007 demande une attention que son intitulé ne laisse pas deviner. La directive était presque
+inutilisée — `std::string`, `std::vector`, `std::pow`, `std::cout` sont déjà qualifiés partout. Ce
+qui restait, ce sont les `pow` et `sqrt` nus, et **un préfixe uniforme les aurait cassés** : `T0`
+est un `double`, tandis que `Cp`, `c` et `gamma` sont des `expression`. Donc `pow(T0,n)` et le
+`sqrt` sur doubles passent en `std::`, tandis que `sqrt(Cp*(gamma-1)/T0)` et `pow(c,2)` restent nus
+et continuent de résoudre vers `sl::`. L'inverse aurait compilé en changeant le sens.
+
+Vérifié plutôt que supposé, avec le gcc 16.1 local en `__cplusplus 202002L` : l'unité de traduction
+compile, et le contrôle négatif — le fichier d'origine, même configuration — rend bien ses
+18 erreurs `reference to 'integral' is ambiguous`.

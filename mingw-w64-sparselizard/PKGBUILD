@@ -18,6 +18,7 @@ mingw_arch=('mingw64' 'ucrt64' 'clang64' 'clangarm64')
 url='http://www.sparselizard.org'
 license=('spdx:GPL-2.0-or-later')
 depends=("${MINGW_PACKAGE_PREFIX}-cc-libs"
+         "${MINGW_PACKAGE_PREFIX}-gmsh"
          "${MINGW_PACKAGE_PREFIX}-openblas"
          "${MINGW_PACKAGE_PREFIX}-petsc"
          "${MINGW_PACKAGE_PREFIX}-slepc")
@@ -33,8 +34,10 @@ source=("${_realname}::git+https://github.com/halbux/sparselizard.git#commit=${_
         '0003-Export-a-CMake-package-and-an-MSBuild-property-sheet.patch'
         '0004-Fall-back-to-PETSc-s-own-LU-when-the-requested-solve.patch'
         '0005-Find-a-PETSc-that-ships-one-library-per-variant.patch'
-        '0006-Emit-the-Visual-Studio-artefacts-for-MSVC-not-for-Wi.patch')
+        '0006-Emit-the-Visual-Studio-artefacts-for-MSVC-not-for-Wi.patch'
+        '0007-Drop-the-global-using-namespace-std-from-an-example.patch')
 sha256sums=('SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -61,6 +64,10 @@ sha256sums=('SKIP'
 #        and parallel model, which is how it is packaged here.
 #  0006  emits the Visual Studio artefacts for MSVC rather than for Windows at
 #        large, MinGW being Windows too.
+#  0007  removes a global "using namespace std" from the one example that had
+#        one. Same collision as 0002, in the last place it survived: under the
+#        C++20 that gcc 16 defaults to, every integral() call in that example is
+#        ambiguous and it does not compile.
 
 prepare() {
   cd "${srcdir}/${_realname}"
@@ -77,6 +84,13 @@ build() {
   #
   # OpenMP is off for sparselizard itself: it does not need it. Its dependencies
   # are where the parallelism lives, and petsc-dto is already built with it.
+  #
+  # Gmsh is on. It is not decoration: the native mesh reader only handles the 2.2
+  # format, and an example or an application carrying a 4.1 mesh -- what recent
+  # Gmsh writes by default -- fails at run time without the API. mingw-w64-gmsh
+  # declares the same four environments as this package and ships both gmsh.h and
+  # the import library. The cost is the dependency closure, some 300 MB of which
+  # OpenCASCADE is the bulk.
   MSYS2_ARG_CONV_EXCL=-DCMAKE_INSTALL_PREFIX= \
     "${MINGW_PREFIX}/bin/cmake.exe" \
       -GNinja \
@@ -85,7 +99,7 @@ build() {
       -DPETSC_VARIANT=dto \
       -DSPARSELIZARD_ENABLE_OPENMP=OFF \
       -DSPARSELIZARD_ENABLE_MPI=OFF \
-      -DSPARSELIZARD_ENABLE_GMSH=OFF \
+      -DSPARSELIZARD_ENABLE_GMSH=ON \
       -DSPARSELIZARD_BUILD_SIMULATIONS=OFF \
       -DSPARSELIZARD_BUILD_EXAMPLES=OFF \
       -S "${srcdir}/${_realname}" \
