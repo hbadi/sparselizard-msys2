@@ -13,7 +13,7 @@ pas supposé. Ce qui reste une hypothèse est signalé comme tel.
 **Acquis, mesuré :**
 
 - `mingw-w64-sparselizard` construit sur **les quatre saveurs** — mingw64, ucrt64, clang64,
-  clangarm64 — à partir de l'amont plus six patchs.
+  clangarm64 — à partir de l'amont plus huit patchs.
 - `petsc-mumps` construit sur les quatre, dans les **trois** modèles de parallélisme
   (`dso` séquentiel, `dto` OpenMP, `dmo` MPI avec ScaLAPACK).
 - La **chaîne complète** est prouvée sur les deux environnements gcc : une application consommant
@@ -27,10 +27,10 @@ pas supposé. Ce qui reste une hypothèse est signalé comme tel.
 - Le **mécanisme** du blocage. On sait ce qui le déclenche — OpenMP — pas ce qui se passe. Il reste
   donc entier en `dto`, la variante que le paquet sparselizard utilise.
 
-**Non fait :**
+**Engagé :**
 
-- La soumission à `msys2/MINGW-packages`. Prévu : une **issue avant toute PR**, le PKGBUILD amont
-  portant une ligne `# Contributor` (Oleg A. Khlybov) et pas de mainteneur actif.
+- La soumission à `msys2/MINGW-packages` : l'**issue est ouverte**, [#30888][issue], et attend une
+  réponse. La PR qu'elle promet reste à envoyer. Voir §6.
 
 ---
 
@@ -374,6 +374,25 @@ Les 9 échecs, en trois familles, et **aucun n'était un défaut de la biblioth�
 
 L'échec de compilation sur gcc est traité par le patch 0007.
 
+**Les cinq échecs d'exécution sont traités par le patch 0008**, qui ne les enregistre plus. Le
+raisonnement : cinq exemples rouges à chaque run, pour des motifs connus et acceptés, font qu'un
+run rouge ne signale plus rien — c'est le contraire de ce qu'on demande à une suite. Les conditions
+sont lues dans l'exemple lui-même, jamais tenues dans une liste qui vieillirait.
+
+Vérifié **dans les deux sens**, un garde qui écarte trop étant pire que pas de garde :
+
+```
+gmsh OFF   49 cibles sur 57,  8 écartées, chacune avec son motif
+gmsh ON    55 cibles sur 57,  2 écartées — les deux maillages absents
+```
+
+La contre-épreuve à `ON` a d'ailleurs trouvé un défaut du garde : `nonlinear-truss-elasticity-2d`
+charge `"gmsh:truss2d.msh"`, où `gmsh:` est un **préfixe de lecteur** — `tool:source`, avec `tool`
+dans {gmsh, petsc, native}, lu par `rawmesh::readfromfile` — et non un nom de fichier. Le garde
+cherchait un fichier littéralement nommé `gmsh:truss2d.msh` et écartait l'exemple à tort quand
+gmsh était activé. Sans la contre-épreuve, le garde aurait masqué en silence un exemple parfaitement
+exécutable.
+
 **Deux pièges du montage, l'un et l'autre payés :**
 
 - **ninja s'arrête à la première erreur.** Un exemple qui ne compilait pas a empêché les 56 autres
@@ -430,7 +449,7 @@ d'un lecteur 4.1 se manifeste pour autre chose que les exemples.
 
 ## 8. Correctifs sparselizard portés en patchs
 
-Sept, dans `mingw-w64-sparselizard/`, appliqués sur le commit amont `0b826d88` :
+Huit, dans `mingw-w64-sparselizard`, appliqués sur le commit amont `0b826d88` :
 
 | patch | objet |
 | --- | --- |
@@ -441,8 +460,10 @@ Sept, dans `mingw-w64-sparselizard/`, appliqués sur le commit amont `0b826d88` 
 | 0005 | découverte d'un PETSc livrant une bibliothèque par variante |
 | 0006 | artefacts Visual Studio émis pour MSVC et non pour Windows au sens large |
 | 0007 | retrait du `using namespace std` du seul exemple qui en avait un |
+| 0008 | un exemple qui ne peut pas tourner n'est plus enregistré |
 
-Les 0002, 0004, 0005, 0006 et 0007 sont des correctifs amont à part entière, indépendants de MSYS2.
+Les 0002, 0004, 0005, 0006, 0007 et 0008 sont des correctifs amont à part entière, indépendants de
+MSYS2.
 
 Le 0007 demande une attention que son intitulé ne laisse pas deviner. La directive était presque
 inutilisée — `std::string`, `std::vector`, `std::pow`, `std::cout` sont déjà qualifiés partout. Ce

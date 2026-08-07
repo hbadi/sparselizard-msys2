@@ -1,0 +1,114 @@
+From 6a6a7b9855435e3fa79ada499ecd62089685a375 Mon Sep 17 00:00:00 2001
+From: hbadi <badi.hamid@gmail.com>
+Date: Fri, 7 Aug 2026 10:16:11 +0200
+Subject: [PATCH] Do not register an example that cannot possibly run
+
+The examples already skip what cannot be built: an example including gmsh.h is
+left out when the Gmsh API is off. What compiles but cannot run was still
+registered, and that costs the suite its meaning -- five of the fifty-seven fail
+every single time for reasons already known and accepted, so red stops saying
+anything.
+
+Three more conditions, each read from the example itself rather than kept in a
+list that would go stale:
+
+  - a mesh in the 4.x format with the API off. gmshinterface rejects
+    formatversion >= 4 in the native reader and says to use the API, so the
+    example dies on its first line. The test here is the same one, in the same
+    place: the line after $MeshFormat.
+  - a mesh name asking for the gmsh reader through the "tool:source" prefix that
+    rawmesh::readfromfile parses. On the examples as they stand this never fires
+    on its own, the three that ask for it also carrying a 4.x mesh, but the two
+    conditions are independent.
+  - a mesh the example loads that is not in the tree. Two examples ship a .geo
+    and no .msh. Names quoted inside a write() call are excluded, or an example
+    writing a mesh it was never given -- there is one -- would be dropped wrongly.
+
+Checked both ways, since a guard that skips too much is worse than none: with
+the API off 49 of 57 register and the eight skips each name their reason, with
+it on 55 do and only the two absent meshes remain.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ examples/CMakeLists.txt | 65 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 65 insertions(+)
+
+diff --git a/examples/CMakeLists.txt b/examples/CMakeLists.txt
+index 058b6e5b..b18e7efe 100644
+--- a/examples/CMakeLists.txt
++++ b/examples/CMakeLists.txt
+@@ -51,6 +51,71 @@ foreach(_main IN LISTS _example_mains)
+         continue()
+     endif()
+ 
++    # The same reasoning one step further: an example that compiles but cannot
++    # possibly run is not registered either. A suite that is red for reasons
++    # already known and accepted stops reporting anything, and the three cases
++    # below are exactly that. All three are read from the example rather than
++    # kept in a list here, so none of them can go stale.
++
++    # A mesh in the 4.x format needs the Gmsh API. gmshinterface rejects
++    # formatversion >= 4 in the native reader and says to use the API, so with
++    # the option off the example dies on its first line. Same test, same place:
++    # the line following $MeshFormat.
++    set(_needs_gmsh_mesh FALSE)
++    file(GLOB _example_meshes "${_dir}/*.msh")
++    foreach(_m IN LISTS _example_meshes)
++        file(STRINGS "${_m}" _head LIMIT_COUNT 4)
++        set(_take_next FALSE)
++        foreach(_line IN LISTS _head)
++            if(_take_next)
++                if("${_line}" MATCHES "^([0-9]+)")
++                    if(CMAKE_MATCH_1 GREATER_EQUAL 4)
++                        set(_needs_gmsh_mesh TRUE)
++                    endif()
++                endif()
++                break()
++            endif()
++            if("${_line}" MATCHES "^\\$MeshFormat")
++                set(_take_next TRUE)
++            endif()
++        endforeach()
++    endforeach()
++    if(_needs_gmsh_mesh AND NOT SPARSELIZARD_ENABLE_GMSH)
++        list(APPEND _skipped_examples
++             "${_name} (mesh in the 4.x format, needs SPARSELIZARD_ENABLE_GMSH)")
++        continue()
++    endif()
++
++    # A mesh name may also carry the reader to use, as a "tool:source" prefix,
++    # the tools being gmsh, petsc and native (rawmesh::readfromfile). Asking for
++    # the gmsh one needs the API whatever the format is. On the examples as they
++    # stand this never fires on its own -- the three that ask for it also carry a
++    # 4.x mesh, so the test above catches them first -- but the two conditions are
++    # independent and an example is free to meet only this one.
++    if(_src MATCHES "\"gmsh:" AND NOT SPARSELIZARD_ENABLE_GMSH)
++        list(APPEND _skipped_examples "${_name} (asks for the gmsh reader, needs SPARSELIZARD_ENABLE_GMSH)")
++        continue()
++    endif()
++
++    # A mesh the example loads but that is not in the repository. Names quoted in
++    # a write() call are excluded: those are outputs, and an example is free to
++    # write a mesh it was never given.
++    set(_absent_mesh "")
++    string(REGEX MATCHALL "\"[^\"]*\\.msh\"" _quoted_meshes "${_src}")
++    foreach(_q IN LISTS _quoted_meshes)
++        string(REPLACE "\"" "" _fn "${_q}")
++        # Drop the reader prefix, if any: "gmsh:truss2d.msh" is truss2d.msh.
++        string(REGEX REPLACE "^[a-z]+:" "" _fn "${_fn}")
++        if(NOT EXISTS "${_dir}/${_fn}" AND NOT _src MATCHES "write[ \t]*\\([^)]*${_fn}")
++            set(_absent_mesh "${_fn}")
++            break()
++        endif()
++    endforeach()
++    if(_absent_mesh)
++        list(APPEND _skipped_examples "${_name} (loads ${_absent_mesh}, which is not in the tree)")
++        continue()
++    endif()
++
+     add_executable(${_name} "${_main}")
+     target_link_libraries(${_name} PRIVATE sparselizard)
+     list(APPEND _example_targets ${_name})
+-- 
+2.53.0.windows.2
+
