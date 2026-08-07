@@ -393,6 +393,20 @@ cherchait un fichier littéralement nommé `gmsh:truss2d.msh` et écartait l'exe
 gmsh était activé. Sans la contre-épreuve, le garde aurait masqué en silence un exemple parfaitement
 exécutable.
 
+**État de référence, avec 0007 et 0008**, et c'est le même sur les quatre :
+
+```
+MINGW64      49 cibles   45 passent   4 échouent   3209 s
+UCRT64       49          45           4            3276 s
+CLANG64      49          45           4            3367 s
+CLANGARM64   49          45           4            3196 s
+```
+
+Les quatre échecs sont **exactement les quatre dépassements de 600 s**, sur les quatre
+environnements. Plus rien d'autre : le rouge ne désigne plus qu'une seule chose, et elle est
+identifiée. C'est aussi la première fois qu'une chaîne gcc va jusqu'au bout du lot — le 0007 le
+permet, `reference to 'integral' is ambiguous` n'apparaît plus.
+
 **Deux pièges du montage, l'un et l'autre payés :**
 
 - **ninja s'arrête à la première erreur.** Un exemple qui ne compilait pas a empêché les 56 autres
@@ -444,6 +458,24 @@ chaînes clang, elles, sont passées : c'est un aléa, pas un déterminisme.
 **Conséquence assumée** : six exemples sur 57 restent inexercés — trois écartés à la configuration
 pour `gmsh.h`, trois qui échouent à l'exécution sur leur maillage 4.1. À reprendre si le besoin
 d'un lecteur 4.1 se manifeste pour autre chose que les exemples.
+
+**Ce que gmsh apporterait vraiment**, mesuré avant de renoncer — le run avec l'option activée est
+allé au bout sur clang64 :
+
+```
+57 cibles   49 passent   8 échouent   4379 s
+```
+
+- les **trois exemples en maillage 4.1 passent**, c'était bien gmsh qui manquait :
+  `nonlinear-truss-elasticity-2d` 4,8 s, `amr-random-criterion-2d` 7,7 s,
+  `amr-random-criterion-3d` 312 s ;
+- mais les **trois écartés pour `gmsh.h` ne sont pas un gain net** : seul `gmsh-api-link` passe
+  (71,6 s). `magnetodynamics-av-2d` dépasse les 600 s, et `magnetodynamics-hphi-2d` échoue sur un
+  défaut qui lui est propre — `physical region number 5 is not defined` — que gmsh ne corrige pas ;
+- les **deux maillages absents restent absents**, gmsh ne les invente pas.
+
+Bilan : **+4 qui passent, +2 qui échouent**, et le lot passe de 53 à 73 minutes, contre 2,47 Go de
+dépendances. Si la question revient, elle repart de ces chiffres et non d'une estimation.
 
 ---
 
